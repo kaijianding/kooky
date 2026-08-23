@@ -28,8 +28,17 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
     /// `ForEach` read it per record per evaluation. Also the key the
     /// hidden-sessions file stores, so its shape is wire format.
     let id: String
+    /// The backing session file (or store) used by deletion.
+    let sourceURL: URL
 
-    init(agentId: String, conversationId: String, title: String, cwd: URL, lastActivity: Date) {
+    init(
+        agentId: String,
+        conversationId: String,
+        title: String,
+        cwd: URL,
+        lastActivity: Date,
+        sourceURL: URL = URL(fileURLWithPath: "/dev/null")
+    ) {
         self.agentId = agentId
         self.conversationId = conversationId
         self.title = title
@@ -37,6 +46,7 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
         self.cwdPath = cwd.path
         self.lastActivity = lastActivity
         self.id = "\(agentId):\(conversationId)"
+        self.sourceURL = sourceURL
     }
 }
 
@@ -281,7 +291,8 @@ enum AgentSessionScanner {
             conversationId: conversationId,
             title: cleanedTitle(customTitle ?? summary ?? firstUserText ?? ""),
             cwd: URL(fileURLWithPath: cwd),
-            lastActivity: mtime
+            lastActivity: mtime,
+            sourceURL: file
         )
     }
 
@@ -359,7 +370,8 @@ enum AgentSessionScanner {
             conversationId: conversationId,
             title: cleanedTitle(title ?? ""),
             cwd: URL(fileURLWithPath: cwd),
-            lastActivity: mtime
+            lastActivity: mtime,
+            sourceURL: file
         )
     }
 
@@ -417,10 +429,21 @@ final class AgentSessionHistory {
     static let shared = AgentSessionHistory(
         hiddenFileURL: KookyShellIntegration.kookyAppSupport("hidden-sessions.json", isDirectory: false)
     )
+    /// Test seam: a model preloaded with records so `delete`'s cache sync can
+    /// be asserted without touching real agent stores. Production uses the
+    /// parameterless form; the shared singleton never takes records.
+    private let scanProvider: @Sendable () -> [AgentSessionRecord]
 
     /// `hiddenFileURL` nil keeps hidden ids in memory only — the default, so
     /// a test building its own model can never write the user's real list.
-    init(hiddenFileURL: URL? = nil) {
+    init(
+        records: [AgentSessionRecord] = [],
+        hiddenFileURL: URL? = nil,
+        scanProvider: @escaping @Sendable () -> [AgentSessionRecord] = AgentSessionScanner.scanDefaultRoots
+    ) {
+        self.records = records
+        self.presentAgentIds = Set(records.map(\.agentId))
+        self.scanProvider = scanProvider
         self.hiddenFileURL = hiddenFileURL
         if let hiddenFileURL,
            let data = try? Data(contentsOf: hiddenFileURL),
@@ -435,6 +458,9 @@ final class AgentSessionHistory {
     private static let minSecondsBetweenScans: TimeInterval = 30
 
     private(set) var records: [AgentSessionRecord] = []
+    /// Agents present in `records`, cached at the write so the chips row
+    /// doesn't rebuild the set per keystroke.
+    private(set) var presentAgentIds: Set<String> = []
     /// True only until the FIRST scan lands — refreshes after that keep the
     /// stale list on screen instead of flashing a spinner over it.
     private(set) var isInitialLoad = true
@@ -443,6 +469,7 @@ final class AgentSessionHistory {
     /// state.
     private(set) var isScanning = false
     private var lastScanCompleted: Date?
+    private var refreshGeneration = 0
 
     /// Sessions the user hid from the pane, by `AgentSessionRecord.id`.
     /// kooky-side only — the agent's own data is never touched, so hiding is
@@ -465,7 +492,6 @@ final class AgentSessionHistory {
         )
         try? JSONEncoder().encode(hiddenIds.sorted()).write(to: hiddenFileURL, options: .atomic)
     }
-
     func refresh(force: Bool = false) {
         guard !isScanning else { return }
         if !force, let last = lastScanCompleted,
@@ -473,20 +499,39 @@ final class AgentSessionHistory {
             return
         }
         isScanning = true
+        let generation = refreshGeneration
+        let scanProvider = self.scanProvider
         Task {
             let result = await Task.detached(priority: .utility) {
-                AgentSessionScanner.scanDefaultRoots()
+                scanProvider()
             }.value
-            // Equality gate: most rescans find nothing new, and an
-            // `@Observable` write re-renders every window's History pane
-            // regardless of change.
+            guard generation == refreshGeneration else {
+                isScanning = false
+                return
+            }
             if records != result {
                 records = result
+                presentAgentIds = Set(result.map(\.agentId))
             }
             if isInitialLoad { isInitialLoad = false }
             lastScanCompleted = Date()
             isScanning = false
         }
+    }
+
+    /// Deletes the backing store entry off the main actor (SQLite I/O must
+    /// never block UI), then removes the record from the cache only when the
+    /// disk delete actually happened.
+    func delete(_ record: AgentSessionRecord) async -> Bool {
+        let removed = await Task.detached(priority: .userInitiated) {
+            AgentSessionScanner.delete(record)
+        }.value
+        guard removed else { return false }
+        refreshGeneration &+= 1
+        records.removeAll { $0.id == record.id }
+        presentAgentIds = Set(records.map(\.agentId))
+        lastScanCompleted = Date()
+        return true
     }
 }
 
@@ -588,12 +633,12 @@ struct SessionHistoryView: View {
     /// appears reads as a dead button. The real in-flight fact is the
     /// model's `isScanning`; this only stretches its tail.
     @State private var spinnerMinHold = false
+    @State private var pendingDelete: AgentSessionRecord?
     /// Cleared on the next successful resume, and by the banner's own ✕.
     /// `@State` is right despite this view being unmounted by the panel's
     /// mode cycle — a stale failure from before the user navigated away is
     /// exactly what shouldn't come back.
     @State private var resumeError: String?
-
     var body: some View {
         let filtered = SessionHistoryFilter(
             workspaceRootPaths: store.historyWorkspaceRootPaths,
@@ -634,7 +679,10 @@ struct SessionHistoryView: View {
                                         )
                                     }
                                 },
-                                onSetHidden: { history.setHidden($0, for: record) }
+                                onSetHidden: { history.setHidden($0, for: record) },
+                                onDelete: {
+                                    pendingDelete = record
+                                }
                             )
                         }
                     }
@@ -642,6 +690,13 @@ struct SessionHistoryView: View {
                 }
             }
             Spacer(minLength: 0)
+        }
+        .sheet(item: $pendingDelete) { record in
+            ConfirmDeleteSessionSheet(
+                record: record,
+                confirm: { await history.delete(record) },
+                dismiss: { pendingDelete = nil }
+            )
         }
         .onAppear { history.refresh() }
     }
@@ -825,6 +880,7 @@ private struct SessionHistoryRow: View {
     let isHidden: Bool
     let onResume: () -> Void
     let onSetHidden: (Bool) -> Void
+    let onDelete: () -> Void
 
     @State private var isHovered = false
 
@@ -832,23 +888,30 @@ private struct SessionHistoryRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            HStack(spacing: 10) {
-                AgentIconView(asset: template?.iconAsset, fallbackSymbol: template?.symbol ?? "sparkles", size: 16)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(record.title.isEmpty ? String(localized: "untitled", bundle: .kookyResources) : record.title)
-                        .font(Theme.mono(12, weight: .medium))
-                        .foregroundStyle(record.title.isEmpty ? Theme.chromeMuted : Theme.chromeForeground)
-                        .lineLimit(1)
-                    Text("\(record.cwd.lastPathComponent) · \(relativeActivityLabel(record.lastActivity))")
-                        .font(Theme.mono(10))
-                        .foregroundStyle(Theme.chromeMuted.opacity(0.75))
-                        .lineLimit(1)
+            // Resume lives on its own button — never a tap gesture on the
+            // row container — so context actions can't race a resume tap
+            // on the same click (the delete path is destructive).
+            Button(action: onResume) {
+                HStack(spacing: 10) {
+                    AgentIconView(asset: template?.iconAsset, fallbackSymbol: template?.symbol ?? "sparkles", size: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(record.title.isEmpty ? String(localized: "untitled", bundle: .kookyResources) : record.title)
+                            .font(Theme.mono(12, weight: .medium))
+                            .foregroundStyle(record.title.isEmpty ? Theme.chromeMuted : Theme.chromeForeground)
+                            .lineLimit(1)
+                        Text("\(record.cwd.lastPathComponent) · \(relativeActivityLabel(record.lastActivity))")
+                            .font(Theme.mono(10))
+                            .foregroundStyle(Theme.chromeMuted.opacity(0.75))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .opacity(isHidden ? 0.45 : 1)
             // On the content, not the row: a row-level `.help` would win over
-            // the hide button's own (SwiftUI resolves `.help` outermost-first).
+            // the action buttons' own (SwiftUI resolves `.help` outermost-first).
             .help(hoverText)
             HoverableIconButton(
                 systemName: isHidden ? "eye" : "eye.slash",
@@ -856,6 +919,14 @@ private struct SessionHistoryRow: View {
                 size: Theme.chromeContextButtonSize,
                 help: isHidden ? "show in history" : "hide from history",
                 action: { onSetHidden(!isHidden) }
+            )
+            .revealed(isHovered)
+            HoverableIconButton(
+                systemName: "trash",
+                fontSize: 10,
+                size: Theme.chromeContextButtonSize,
+                help: "delete session",
+                action: onDelete
             )
             .revealed(isHovered)
         }
