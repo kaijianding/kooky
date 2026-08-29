@@ -950,9 +950,13 @@ final class WorkspaceStore {
     }
 
     func activateWorkspace(_ workspace: Workspace) {
-        guard activeWorkspaceId != workspace.id else { return }
+        guard activeWorkspaceId != workspace.id else {
+            startActiveSessions(in: workspace)
+            return
+        }
         fileTreeRootOverride = nil
         activeWorkspaceId = workspace.id
+        startActiveSessions(in: workspace)
         scheduleSave()
     }
 
@@ -1640,6 +1644,7 @@ final class WorkspaceStore {
         // flag is lifelong; PaneView's active-tab exclusion is the one
         // consumer gate, so the structure closes the race with no timing.
         guard let pane = pane(containing: session, in: workspace) else { return }
+        session.startIfNeeded()
         var changed = false
         if pane.activeTabId != session.id {
             pane.activeTabId = session.id
@@ -1815,9 +1820,12 @@ final class WorkspaceStore {
             }
             changed = true
         }
-        if let session = pane.activeTab, !workspace.isPinned, workspace.workingDirectory != session.currentDirectory {
-            workspace.workingDirectory = session.currentDirectory
-            changed = true
+        if let session = pane.activeTab {
+            session.startIfNeeded()
+            if !workspace.isPinned, workspace.workingDirectory != session.currentDirectory {
+                workspace.workingDirectory = session.currentDirectory
+                changed = true
+            }
         }
         invalidateStaleFileTreeRootOverride()
         if changed { scheduleSave() }
@@ -2056,6 +2064,13 @@ final class WorkspaceStore {
         kiroConversationMonitor.stopAll(removeRecords: true)
         fileTree.cancel()
     }
+    /// Starts the active tab in every visible pane after a restored workspace
+    /// is revealed. Inactive tabs keep their config on Session until selected.
+    private func startActiveSessions(in workspace: Workspace) {
+        for pane in workspace.root.allPanes {
+            pane.activeTab?.startIfNeeded()
+        }
+    }
 
     // MARK: - Internals
 
@@ -2110,6 +2125,9 @@ final class WorkspaceStore {
         activeWorkspaceId = workspaces.contains(where: { $0.id == state.activeWorkspaceId })
             ? state.activeWorkspaceId
             : workspaces.first?.id
+        if let activeWorkspace = active {
+            startActiveSessions(in: activeWorkspace)
+        }
         sidebarMode = state.sidebarMode ?? .full
         rightSidebarMode = state.rightSidebarMode ?? .hidden
         sidebarContent = state.sidebarContent ?? .workspaces
@@ -2134,7 +2152,8 @@ final class WorkspaceStore {
                     initialCwd: resolvedSpawnCwd(tab.currentDirectoryPath),
                     sessionId: tab.id,
                     conversationId: tab.conversationId,
-                    sshRemoteHost: sshRemoteHost
+                    sshRemoteHost: sshRemoteHost,
+                    startImmediately: false
                 )
                 session.customTitle = tab.customTitle
                 pane.tabs.append(session)
@@ -2158,10 +2177,10 @@ final class WorkspaceStore {
         }
     }
 
-    /// Spawns the engine + Session. Caller wires `onPwdChange` / `onFocus`
+    /// Builds the engine + Session. Caller wires `onPwdChange` / `onFocus`
     /// after a workspace ref is available — `restore` builds sessions before
     /// the workspace exists, so callbacks can't capture it here.
-    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil, rawLaunchCommand: String? = nil, customTitle: String? = nil, spawnInBackground: Bool = false) -> Session {
+    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil, rawLaunchCommand: String? = nil, customTitle: String? = nil, spawnInBackground: Bool = false, startImmediately: Bool = true) -> Session {
         let engine = engineFactory()
         // Before `engine.start` (and before any view mounts): the flag is
         // what lets the surface come up under a hidden mount (issue #59).
@@ -2215,15 +2234,16 @@ final class WorkspaceStore {
         config.environment.merge(
             KookyShellIntegration.kookyEnvironment(for: sessionId, claudeCustomSettingsAgentId: claudeCustomId)
         ) { _, new in new }
-        engine.start(config: config)
         let session = Session(
             id: sessionId,
             engine: engine,
             currentDirectory: initialCwd,
             agent: template,
             customTitle: customTitle,
-            conversationId: normalizedConversationId
+            conversationId: normalizedConversationId,
+            launchConfig: config
         )
+        if startImmediately { session.startIfNeeded() }
         // Mirror the drops `makeSessionConfig` applies downstream, so the
         // field records what actually reached the command line: an SSH host
         // never carries the LOCAL resume id (M5.rrrr), a non-empty initial
