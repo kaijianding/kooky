@@ -1126,6 +1126,18 @@ struct KookySettingsView: View {
     @Bindable var model: KookySettingsModel
     let onOpenInTab: () -> Void
     @State private var selected: SettingsCategory = .general
+    /// Categories whose detail tree has been built at least once this window
+    /// session. Each visited detail stays mounted (opacity-hidden when not
+    /// selected) so switching back is an opacity flip instead of a full
+    /// rebuild — the Appearance tree alone costs ~200ms to rebuild. Lives
+    /// here (not in the model) so it dies with the view tree when the
+    /// Settings window closes, keeping the cache window-scoped.
+    @State private var visited: Set<SettingsCategory> = [.general]
+    /// Bumped when the user switches to Open in, so `OpenInReorderList` can
+    /// re-resolve LaunchServices on each visit even though it now stays
+    /// mounted (its old `onAppear` only fired because the switch tore it down
+    /// every time).
+    @State private var openInReloadTick = 0
 
     var body: some View {
         // The autosave `.onChange` observers are split across two statements
@@ -1231,7 +1243,11 @@ struct KookySettingsView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 7)
         .contentShape(Rectangle())
-        .onTapGesture { selected = category }
+        .onTapGesture {
+            selected = category
+            visited.insert(category)
+            if category == .openIn { openInReloadTick += 1 }
+        }
     }
 
     @ViewBuilder
@@ -1266,17 +1282,38 @@ struct KookySettingsView: View {
                     .padding(.horizontal, 28)
                     .padding(.bottom, 18)
             }
-            switch selected {
-            case .general: generalDetail
-            case .appearance: appearanceDetail
-            case .codingAgents: codingAgentsDetail
-            case .terminalPresets: terminalPresetsDetail
-            case .openIn: openInDetail
-            case .statusBar: statusBarDetail
-            case .notifications: notificationsDetail
-            case .advanced: advancedDetail
+            // Keep every visited detail mounted and toggle visibility by
+            // opacity. Rebuilding the whole tree on each switch is what made
+            // the Appearance tab (two 40+-item theme menus) hitch ~200ms —
+            // mounting once and flipping opacity turns a switch into a cheap
+            // alpha pass. Unvisited categories are simply absent (lazy), and
+            // a hidden tab is compressed to zero height so the ScrollView still
+            // sizes to the active tab, not the tallest one.
+            ZStack(alignment: .topLeading) {
+                ForEach(SettingsCategory.allCases.filter(visited.contains)) { category in
+                    detailBody(category)
+                        .opacity(category == selected ? 1 : 0)
+                        .frame(height: category == selected ? nil : 0, alignment: .top)
+                        .clipped()
+                        .allowsHitTesting(category == selected)
+                        .accessibilityHidden(category != selected)
+                }
             }
             Spacer(minLength: 28)
+        }
+    }
+
+    @ViewBuilder
+    private func detailBody(_ category: SettingsCategory) -> some View {
+        switch category {
+        case .general: generalDetail
+        case .appearance: appearanceDetail
+        case .codingAgents: codingAgentsDetail
+        case .terminalPresets: terminalPresetsDetail
+        case .openIn: openInDetail
+        case .statusBar: statusBarDetail
+        case .notifications: notificationsDetail
+        case .advanced: advancedDetail
         }
     }
 
@@ -1541,7 +1578,7 @@ struct KookySettingsView: View {
     }
 
     private var openInDetail: some View {
-        OpenInReorderList(model: model)
+        OpenInReorderList(model: model, reloadTick: openInReloadTick)
     }
 
     private var statusBarDetail: some View {
@@ -2322,6 +2359,27 @@ final class KookySettingsWindowController: NSWindowController {
         // content keeps its safe-area inset, so rows still sit below the bar.
         window.configureGlassChrome()
         self.window = window
+        // Window-scoped keep-alive cache: the visited-detail cache lives in
+        // `KookySettingsView`'s `@State`, so it dies with the view tree. Tear
+        // the view tree down on close so the next `show()` rebuilds fresh
+        // instead of persisting the cached tabs for the whole process. We
+        // must clear `contentViewController` explicitly: `isReleasedWhenClosed
+        // = false` keeps the NSWindow object alive after close, so nil-ing
+        // just our refs would leave the hosting tree (and its cache) mounted.
+        // Done next tick — dropping an NSWindow synchronously inside
+        // willClose can crash AppKit mid-close.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.window?.contentViewController = nil
+                self.host = nil
+                self.window = nil
+            }
+        }
     }
 
     /// Settings-owned open panels always attach to the Settings window, not
@@ -2951,11 +3009,15 @@ private struct OpenWithPreferences: View {
 /// are omitted — there's nothing to toggle. Mirrors `StatusBarReorderList`.
 private struct OpenInReorderList: View {
     @Bindable var model: KookySettingsModel
+    /// Bumped by the parent each time the user switches to Open in. With
+    /// keep-alive mounting the list stays resident, so `onAppear` no longer
+    /// fires per visit — this tick replaces it as the re-resolve trigger.
+    let reloadTick: Int
     @State private var draggingId: String?
     @State private var endTargeted = false
-    /// Bumped in `onAppear` after invalidating the resolver cache, to force
-    /// `apps` to re-resolve this appearance (cache-clear alone isn't an
-    /// observable change). See `onAppear` below.
+    /// Bumped after invalidating the resolver cache, to force `apps` to
+    /// re-resolve this appearance (cache-clear alone isn't an observable
+    /// change).
     @State private var refreshTick = 0
 
     private var apps: [OpenInApp] {
@@ -2963,8 +3025,8 @@ private struct OpenInReorderList: View {
     }
 
     var body: some View {
-        // Reading `refreshTick` registers the dependency so its onAppear bump
-        // (below) invalidates this body and re-resolves `apps` against the
+        // Reading `refreshTick` registers the dependency so the re-resolve
+        // below invalidates this body and re-computes `apps` against the
         // freshly-cleared resolver cache.
         let _ = refreshTick
         return VStack(alignment: .leading, spacing: 0) {
@@ -3013,16 +3075,16 @@ private struct OpenInReorderList: View {
             .padding(.horizontal, 28)
             .padding(.top, 14)
         }
-        // Drop any stale install/uninstall cache the top-bar button populated
-        // during this session, then bump `refreshTick` so the list re-resolves
-        // `apps` against the cleared cache on this same appearance — clearing
-        // the cache isn't observable, so without the bump a newly-installed app
-        // wouldn't show (or an uninstalled one wouldn't drop) until an unrelated
-        // re-render.
-        .onAppear {
-            OpenInResolver.invalidate()
-            refreshTick += 1
-        }
+        // The list stays mounted now (keep-alive), so `onAppear` only fires
+        // once per window session. Re-resolve LaunchServices on every visit
+        // via the parent's `reloadTick` bump, and once on first mount.
+        .onAppear { refreshInstalledApps() }
+        .onChange(of: reloadTick) { _, _ in refreshInstalledApps() }
+    }
+
+    private func refreshInstalledApps() {
+        OpenInResolver.invalidate()
+        refreshTick += 1
     }
 
     private var hasCustomisation: Bool {
