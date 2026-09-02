@@ -153,7 +153,6 @@ final class KookySettingsModel {
     /// Maximum width of a tab item in pixels. The setting is app-specific and
     /// capped so a long title cannot consume the whole tab strip.
     var tabMaxWidth: Int = KookySettingsModel.defaultTabMaxWidth
-
     /// Dark chrome background mix toward black. Stored under
     /// `appearance.chromeBackgroundMix`; 0.16 preserves the existing default.
     var chromeBackgroundMix: Double = KookySettingsModel.defaultChromeBackgroundMix
@@ -389,6 +388,7 @@ final class KookySettingsModel {
         } else {
             backgroundOpacity = nil
         }
+        chromeBackgroundMix = Self.resolvedChromeBackgroundMix(appearance["chromeBackgroundMix"])
         let themePreferences = Self.themePreferences(
             appearance: appearance,
             legacyRawTheme: terminal["theme"] as? String,
@@ -674,6 +674,9 @@ final class KookySettingsModel {
                 ? nil
                 : darkTheme
         }
+        appearance["chromeBackgroundMix"] = abs(
+            min(max(chromeBackgroundMix, 0), 1) - Self.defaultChromeBackgroundMix
+        ) < 0.0005 ? nil : min(max(chromeBackgroundMix, 0), 1)
         appearance["showSearchPill"] = showSearchPill ? nil : false
         appearance.removeValue(forKey: "showAgentMenuBarItem")
         appearance["showAgentPanelTag"] = showAgentPanelTag ? nil : false
@@ -754,6 +757,7 @@ final class KookySettingsModel {
             || (previousAppearance["lightTheme"] as? String) != (appearance["lightTheme"] as? String)
             || (previousAppearance["darkTheme"] as? String) != (appearance["darkTheme"] as? String)
             || (previousAppearance["themeSchemaVersion"] as? NSNumber) != (appearance["themeSchemaVersion"] as? NSNumber)
+            || (previousAppearance["chromeBackgroundMix"] as? NSNumber) != (appearance["chromeBackgroundMix"] as? NSNumber)
         let themeChanged = (previousTerminal["theme"] as? String) != (terminal["theme"] as? String)
             || appearanceThemeChanged
         let glassChanged = (previousTerminal["background-blur"] as? String) != (terminal["background-blur"] as? String)
@@ -802,6 +806,15 @@ final class KookySettingsModel {
             ?? (legacyGeneral["showSearchPill"] as? Bool)
             ?? true
     }
+    static func resolvedChromeBackgroundMix(_ rawValue: Any?) -> Double {
+        let value: Double
+        if let number = rawValue as? NSNumber {
+            value = number.doubleValue
+        } else {
+            value = defaultChromeBackgroundMix
+        }
+        return min(max(value, 0), 1)
+    }
 
     static func resolvedTabMaxWidth(_ rawValue: Any?) -> Int {
         let value: Int
@@ -811,16 +824,6 @@ final class KookySettingsModel {
             value = defaultTabMaxWidth
         }
         return min(max(value, minimumTabMaxWidth), defaultTabMaxWidth)
-    }
-
-    static func resolvedChromeBackgroundMix(_ rawValue: Any?) -> Double {
-        let value: Double
-        if let number = rawValue as? NSNumber {
-            value = number.doubleValue
-        } else {
-            value = defaultChromeBackgroundMix
-        }
-        return min(max(value, 0), 1)
     }
 
     /// The importer stores repeated ghostty config lines as a JSON array and
@@ -1179,7 +1182,6 @@ struct KookySettingsView: View {
             .onChange(of: model.backgroundBlur) { _, _ in model.flushSave() }
             .onChange(of: model.backgroundOpacity) { _, _ in model.scheduleSave() }
             .onChange(of: model.tabMaxWidth) { _, _ in model.scheduleSave() }
-
         let secondAutosave = firstAutosave
             .onChange(of: model.chromeBackgroundMix) { _, _ in model.scheduleSave() }
             .onChange(of: model.agentOrder) { _, _ in model.scheduleSave() }
@@ -1432,6 +1434,19 @@ struct KookySettingsView: View {
             .padding(.top, 22)
 
             SettingsSection(title: "Window Chrome") {
+                SettingsRow(label: "chrome-background-mix") {
+                    HStack(spacing: 8) {
+                        Text(chromeBackgroundMixLabel)
+                            .font(Theme.mono(12))
+                            .foregroundStyle(Theme.chromeForeground)
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
+                        Slider(value: chromeBackgroundMixBinding, in: 0...1, step: 0.01)
+                            .frame(width: 140)
+                    }
+                }
+                SettingsCaption("Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default.")
+                SettingsHairline()
                 SettingsRow(label: "show-search-pill") {
                     Toggle("", isOn: $model.showSearchPill)
                         .labelsHidden()
@@ -1746,6 +1761,19 @@ struct KookySettingsView: View {
 
     private var backgroundOpacityLabel: String {
         "\(Int((effectiveBackgroundOpacity * 100).rounded()))%"
+    }
+    private var chromeBackgroundMixBinding: Binding<Double> {
+        Binding(
+            get: { model.chromeBackgroundMix },
+            set: {
+                let next = min(max(($0 * 100).rounded() / 100, 0), 1)
+                if next != model.chromeBackgroundMix { model.chromeBackgroundMix = next }
+            }
+        )
+    }
+
+    private var chromeBackgroundMixLabel: String {
+        "\(Int((model.chromeBackgroundMix * 100).rounded()))%"
     }
 
     /// The picker shows what's *in effect* (kooky's own value, else the ghostty
