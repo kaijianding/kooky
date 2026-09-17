@@ -1811,7 +1811,10 @@ final class WorkspaceStore {
     /// workspace, `-1` to the previous; both wrap at the end. Order is
     /// `workspaces` itself — the sidebar's display order.
     func cycleWorkspace(direction: Int) {
-        guard let currentIdx = workspaces.firstIndex(where: { $0.id == activeWorkspaceId }) else { return }
+        guard workspaces.count > 1,
+              let activeId = activeWorkspaceId,
+              let currentIdx = workspaces.firstIndex(where: { $0.id == activeId })
+        else { return }
         activateWorkspace(workspaces[workspaces.cyclicIndex(from: currentIdx, step: direction)])
     }
 
