@@ -1,7 +1,7 @@
 import XCTest
 @testable import KookyKit
 
-/// ⌃⌘[ / ⌃⌘] workspace cycling, ⌥⌘ + arrow pane focus, ⌃⌘ + arrow divider moves.
+/// ⌘⌥↑ / ⌘⌥↓ and ⌃⌘[ / ⌃⌘] workspace cycling, ⌘⌥← / ⌘⌥→ and ⌃⇥ tab cycling, ⌃⌥ + arrow pane focus, ⌃⌘ + arrow divider moves.
 @MainActor
 final class KeyboardNavigationTests: XCTestCase {
     private let dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -259,5 +259,44 @@ final class KeyboardNavigationTests: XCTestCase {
 
         store.moveDivider(toward: .right, in: ws)
         XCTAssertEqual(fraction(ws.root), before)
+    }
+    // MARK: - Menu shortcuts
+
+    func testViewMenuShortcutsDoNotCollide() {
+        let delegate = AppDelegate()
+        delegate.installMainMenu()
+        guard let mainMenu = NSApp.mainMenu,
+              let viewMenu = mainMenu.items.compactMap(\.submenu).first(where: {
+                  $0.items.contains { $0.action == Selector(("handleToggleZoom")) }
+              }) else {
+            XCTFail("View menu not found")
+            return
+        }
+
+        // Focus Pane sub-items must use Control+Option, not Command+Option
+        let focusPaneSubmenu = viewMenu.items.compactMap(\.submenu).first(where: {
+            $0.items.contains { $0.action == Selector(("handleFocusPaneInDirection:")) }
+        })
+        XCTAssertNotNil(focusPaneSubmenu)
+        for item in focusPaneSubmenu?.items ?? [] {
+            XCTAssertEqual(item.keyEquivalentModifierMask, NSEvent.ModifierFlags([.control, .option]), "Focus pane items must not shadow ⌘⌥ arrow shortcuts")
+        }
+
+        // Command+Option arrows must be mapped to Tab & Workspace cycling
+        let prevTabArrow = viewMenu.items.first(where: { $0.action == Selector(("handlePreviousTab")) && $0.keyEquivalent == "\u{F702}" })
+        XCTAssertNotNil(prevTabArrow)
+        XCTAssertEqual(prevTabArrow?.keyEquivalentModifierMask, NSEvent.ModifierFlags([.command, .option]))
+
+        let nextTabArrow = viewMenu.items.first(where: { $0.action == Selector(("handleNextTab")) && $0.keyEquivalent == "\u{F703}" })
+        XCTAssertNotNil(nextTabArrow)
+        XCTAssertEqual(nextTabArrow?.keyEquivalentModifierMask, NSEvent.ModifierFlags([.command, .option]))
+
+        let prevWorkspaceArrow = viewMenu.items.first(where: { $0.action == Selector(("handlePreviousWorkspace")) && $0.keyEquivalent == "\u{F700}" })
+        XCTAssertNotNil(prevWorkspaceArrow)
+        XCTAssertEqual(prevWorkspaceArrow?.keyEquivalentModifierMask, NSEvent.ModifierFlags([.command, .option]))
+
+        let nextWorkspaceArrow = viewMenu.items.first(where: { $0.action == Selector(("handleNextWorkspace")) && $0.keyEquivalent == "\u{F701}" })
+        XCTAssertNotNil(nextWorkspaceArrow)
+        XCTAssertEqual(nextWorkspaceArrow?.keyEquivalentModifierMask, NSEvent.ModifierFlags([.command, .option]))
     }
 }

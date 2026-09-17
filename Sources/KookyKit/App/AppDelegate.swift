@@ -22,7 +22,7 @@ private enum MenuTag {
     static func direction(from tag: Int) -> PaneDirection? { PaneDirection(rawValue: tag - 201) }
 }
 
-/// Menu presentation for the ⌥⌘ / ⌃⌘ + arrow rows — exhaustive, so a new
+/// Menu presentation for the ⌃⌥ / ⌃⌘ + arrow rows — exhaustive, so a new
 /// direction can't ship as a blank, shortcut-less item.
 private extension PaneDirection {
     /// NSEvent's arrow function-key codepoints.
@@ -1159,7 +1159,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// NSMenu first, so they fire even though `GhosttySurfaceView.keyDown`
     /// captures every other key — the menu system gets first dibs on `⌘x`
     /// before keyDown sees the event.
-    private func installMainMenu() {
+    func installMainMenu() {
         let mainMenu = NSMenu()
 
         // App menu — system-routed selectors via the responder chain. About
@@ -1238,11 +1238,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 tag: MenuTag.workspace(n)
             )
         }
-        // ⌥⌘ / ⌃⌘ + arrow: Ghostty's (and Warp's / cmux's) pane navigation
-        // and divider keys.
+        // ⌃⌥ / ⌃⌘ + arrow: pane navigation and divider keys.
         let focusPaneMenu = buildMenu(title: "Focus Pane", entries: PaneDirection.allCases.map {
             selfRow($0.focusPaneTitle, #selector(handleFocusPaneInDirection(_:)), $0.arrowKey,
-                    modifiers: [.command, .option], tag: MenuTag.direction($0))
+                    modifiers: [.control, .option], tag: MenuTag.direction($0))
         })
         let moveDividerMenu = buildMenu(title: "Move Divider", entries: PaneDirection.allCases.map {
             selfRow($0.moveDividerTitle, #selector(handleMoveDivider(_:)), $0.arrowKey,
@@ -1277,6 +1276,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             // ordinal (⌘9 = last tab); cycle wraps at the ends.
             selfRow("Next Tab", #selector(handleNextTab), "\t", modifiers: [.control]),
             selfRow("Previous Tab", #selector(handlePreviousTab), "\t", modifiers: [.control, .shift]),
+            // Same tab cycle on ⌘⌥← / ⌘⌥→, pairing with the ⌘⌥↑ / ⌘⌥↓
+            // workspace cycle below into one arrow-key family.
+            selfRow("Previous Tab", #selector(handlePreviousTab), "\u{F702}", modifiers: [.command, .option]),
+            selfRow("Next Tab", #selector(handleNextTab), "\u{F703}", modifiers: [.command, .option]),
             .separator,
         ]
         + tabSwitchRows
@@ -1286,6 +1289,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             // has no workspace layer to align with. Wraps at the ends.
             selfRow("Previous Workspace", #selector(handlePreviousWorkspace), "[", modifiers: [.command, .control]),
             selfRow("Next Workspace", #selector(handleNextWorkspace), "]", modifiers: [.command, .control]),
+            // ⌘⌥↑ / ⌘⌥↓ walk the workspace list in sidebar order, wrapping
+            // at the ends — the keyboard counterpart to clicking rows,
+            // without depending on which pane or row holds focus. Discrete
+            // from ⌘⌥1-9 below, which jump to a workspace by ordinal.
+            selfRow("Previous Workspace", #selector(handlePreviousWorkspace), "\u{F700}", modifiers: [.command, .option]),
+            selfRow("Next Workspace", #selector(handleNextWorkspace), "\u{F701}", modifiers: [.command, .option]),
+            .separator,
         ]
         + workspaceSwitchRows
         + [
@@ -1315,9 +1325,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         ])
         mainMenu.addItem(submenu(helpMenu))
 
-        NSApp.mainMenu = mainMenu
-        NSApp.windowsMenu = windowMenu
-        NSApp.helpMenu = helpMenu
+        let app = NSApplication.shared
+        app.mainMenu = mainMenu
+        app.windowsMenu = windowMenu
+        app.helpMenu = helpMenu
     }
 
     // MARK: - Menu DSL
@@ -1628,6 +1639,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         store.cycleTab(in: workspace, direction: -1)
     }
 
+    @objc private func handleNextWorkspace() {
+        activeStore?.cycleWorkspace(direction: 1)
+    }
+
+    @objc private func handlePreviousWorkspace() {
+        activeStore?.cycleWorkspace(direction: -1)
+    }
+
     @objc private func handleSplitRight() {
         guard let store = activeStore, let workspace = store.active,
               let pane = workspace.activePane else { return }
@@ -1669,14 +1688,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         guard let direction = MenuTag.direction(from: sender.tag),
               let store = activeStore, let workspace = store.active else { return }
         store.moveDivider(toward: direction, in: workspace)
-    }
-
-    @objc private func handleNextWorkspace() {
-        activeStore?.cycleWorkspace(direction: 1)
-    }
-
-    @objc private func handlePreviousWorkspace() {
-        activeStore?.cycleWorkspace(direction: -1)
     }
 
     private func cyclePaneFocus(forward: Bool) {

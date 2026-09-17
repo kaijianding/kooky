@@ -1624,12 +1624,17 @@ final class WorkspaceStore {
         activateTab(pane.tabs[pane.tabs.cyclicIndex(from: currentIdx, step: direction)], in: workspace)
     }
 
-    /// Step the active workspace through `workspaces` — the sidebar's order,
-    /// since worktrees are inserted right after their source and dragged
-    /// with it. `+1` next, `-1` previous; wraps at both ends.
+    /// Cycle the active workspace. `direction` of `+1` advances to the next
+    /// workspace, `-1` to the previous; both wrap at the end. Order is
+    /// `workspaces` itself — the sidebar's display order. Restores rather
+    /// than plain-activates so a cycle never lands on a pinned-empty
+    /// workspace with nothing to interact with.
     func cycleWorkspace(direction: Int) {
-        guard let currentIdx = workspaces.firstIndex(where: { $0.id == activeWorkspaceId }) else { return }
-        activateWorkspace(workspaces[workspaces.cyclicIndex(from: currentIdx, step: direction)])
+        guard workspaces.count > 1,
+              let activeId = activeWorkspaceId,
+              let currentIdx = workspaces.firstIndex(where: { $0.id == activeId })
+        else { return }
+        activateOrRestoreWorkspace(workspaces[workspaces.cyclicIndex(from: currentIdx, step: direction)])
     }
 
     func activateTab(_ session: Session, in workspace: Workspace) {
