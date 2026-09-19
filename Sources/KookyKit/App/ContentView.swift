@@ -16,6 +16,9 @@ struct ContentView: View {
     /// never jump while a sidebar drag is in flight. `animate` animates that
     /// expansion (mode toggles only).
     var onWindowLayoutChange: (_ expandIfNeeded: Bool, _ animate: Bool) -> Void = { _, _ in }
+    /// Recent-folders popover (folder icon in the top strip). Holds the list
+    /// snapshot so the popover shows a stable list while open; nil = closed.
+    @State private var recentPicker: PopoverPresentation<[URL]>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -93,6 +96,24 @@ struct ContentView: View {
             ) {
                 withAnimation(Theme.chromeTransition) {
                     store.setSidebarMode(store.sidebarMode.next)
+                }
+            }
+            // Recent folders — to the right of the sidebar-toggle, matching
+            // the brand "+" muscle memory. Clicking a row routes through the
+            // store's injected `onOpenRecentFolder` (same switch-or-open seam
+            // as File → Open Recent / ⌘P).
+            HoverableIconButton(
+                systemName: "folder",
+                fontSize: 12,
+                size: Theme.chromeToolbarButtonSize,
+                help: "Open Recent"
+            ) {
+                recentPicker = PopoverPresentation(value: RecentFolders.shared.existing)
+            }
+            .popover(item: $recentPicker, arrowEdge: .bottom) { presented in
+                RecentFoldersMenu(folders: presented.value) { path in
+                    recentPicker = nil
+                    store.onOpenRecentFolder(path)
                 }
             }
             WindowDragHandle()
@@ -185,4 +206,30 @@ struct ContentView: View {
         }
     }
 
+}
+
+/// The top-strip folder button's recent-folders list — same rows + chrome
+/// styling as the right sidebar's Ask-Agent picker. Disk-filtered
+/// (`RecentFolders.existing`), folder icon + name per row; clicking routes
+/// to `onOpenRecentFolder` (switch-or-open).
+private struct RecentFoldersMenu: View {
+    let folders: [URL]
+    let choose: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(folders, id: \.path) { url in
+                KookyMenuRow(title: url.lastPathComponent, localizesTitle: false) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.chromeMuted)
+                } action: {
+                    choose(url.path)
+                }
+            }
+        }
+        .padding(Theme.space1)
+        .frame(minWidth: 200)
+        .background(Theme.chromeBackground)
+    }
 }

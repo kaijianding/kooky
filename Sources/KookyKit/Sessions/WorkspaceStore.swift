@@ -403,6 +403,19 @@ final class WorkspaceStore {
     /// default a test construction silently inherits; `AppDelegate.addWindow`
     /// wires the real `RecentFolders` sink.
     private let noteRecentFolder: @MainActor (URL) -> Void
+    /// Opens a recently used folder, switching to an already-open workspace
+    /// for that path if one exists across any window (see `AppDelegate
+    /// .openRecentFolder`). Injected so the sidebar's recent-folders
+    /// dropdown shares the File → Open Recent behavior. Defaults to a
+    /// no-op like the other side-effecting callbacks. Internal (not
+    /// `private` like `noteRecentFolder`) because the sidebar's brand
+    /// dropdown reads it to route a recent-folder pick.
+    let onOpenRecentFolder: @MainActor (String) -> Void
+    /// Reports a workspace about to be torn down. `AppDelegate` routes this
+    /// to `ClosedWorkspaces.record` so a workspace closed while carrying a
+    /// tag / custom name / pin can restore them on reopen. Defaults to a
+    /// no-op like the other side-effecting callbacks.
+    private let onWorkspaceClosed: @MainActor (Workspace) -> Void
     private let persistence: any Persistence
     private let gitStatusFetcher = GitStatusFetcher()
     /// One watcher per session — refreshes git status when `.git/HEAD` or
@@ -514,7 +527,9 @@ final class WorkspaceStore {
         peerStores: @escaping @MainActor () -> [WorkspaceStore] = { [] },
         moveToNewWindow: @escaping @MainActor (UUID) -> Void = { _ in },
         onSessionAlert: @escaping @MainActor (UUID, SessionAlertKind) -> Void = { _, _ in },
-        noteRecentFolder: @escaping @MainActor (URL) -> Void = { _ in }
+        noteRecentFolder: @escaping @MainActor (URL) -> Void = { _ in },
+        onOpenRecentFolder: @escaping @MainActor (String) -> Void = { _ in },
+        onWorkspaceClosed: @escaping @MainActor (Workspace) -> Void = { _ in }
     ) {
         self.persistence = persistence
         self.engineFactory = engineFactory
@@ -524,6 +539,8 @@ final class WorkspaceStore {
         self.moveToNewWindow = moveToNewWindow
         self.onSessionAlert = onSessionAlert
         self.noteRecentFolder = noteRecentFolder
+        self.onOpenRecentFolder = onOpenRecentFolder
+        self.onWorkspaceClosed = onWorkspaceClosed
         if let saved = persistence.load(), !saved.workspaces.isEmpty {
             restore(from: saved)
         } else {
@@ -937,6 +954,10 @@ final class WorkspaceStore {
                 teardownSessionMonitors(tab)
             }
         }
+        // Fire while the workspace is still intact so the sink (AppDelegate
+        // → ClosedWorkspaces) can read its tag / name / pin for a future
+        // reopen-restore.
+        onWorkspaceClosed(workspace)
         guard let idx = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
         workspaces.remove(at: idx)
         if workspaces.isEmpty {
@@ -1005,6 +1026,20 @@ final class WorkspaceStore {
     func setTag(_ tag: WorkspaceTag?, for workspace: Workspace) {
         guard workspace.tag != tag else { return }
         workspace.tag = tag
+        scheduleSave()
+    }
+
+    /// Applies a closed-workspace record's identity settings (tag, custom
+    /// name, pin) to a freshly reopened workspace. Mirrors the restore
+    /// decoding in `restore(from:)` and shares its single `scheduleSave`.
+    func applyClosedWorkspace(_ record: ClosedWorkspaces.Record, to workspace: Workspace) {
+        if let preset = record.tagPreset.flatMap(WorkspaceColorTag.init(rawValue:)) {
+            workspace.tag = WorkspaceTag(color: .preset(preset), name: record.tagName)
+        } else if let hex = record.tagCustomHex {
+            workspace.tag = WorkspaceTag(color: .custom(hex: hex), name: record.tagName)
+        }
+        if let custom = record.customTitle { workspace.customTitle = custom }
+        if record.isPinned == true { workspace.isPinned = true }
         scheduleSave()
     }
 
