@@ -4,6 +4,7 @@
 "Clear Glass" = "Clear";
 "DELETE-SESSION" = "DELETE SESSION";
 "delete session" = "Delete session";
+"created %@ · active %@" = "created %@ · active %@";
 "deleting…" = "Deleting…";
 "couldn't delete session" = "Couldn't delete session";
 "Window" = "Window";
