@@ -9,6 +9,7 @@
 "Remove project" = "Remove project";
 "SSH workspaces" = "SSH workspaces";
 "max-tab-width" = "Max tab width";
+"created %@ · active %@" = "created %@ · active %@";
 "chrome-background-mix" = "Chrome background mix";
 "Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default." = "Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default.";
 "Maximum tab width in pixels. Values are capped at 200px." = "Maximum tab width in pixels. Values are capped at 200px.";
