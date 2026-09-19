@@ -261,7 +261,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             peerStores: { [weak self] in self?.windowControllers.map(\.store) ?? [] },
             moveToNewWindow: { [weak self] id in self?.moveTabToNewWindow(sessionId: id) },
             onSessionAlert: { [weak self] id, kind in self?.handleSessionAlert(id, kind) },
-            noteRecentFolder: { RecentFolders.shared.note($0) }
+            noteRecentFolder: { RecentFolders.shared.note($0) },
+            onOpenRecentFolder: { [weak self] path in self?.openRecentFolder(atPath: path) },
+            onWorkspaceClosed: { ClosedWorkspaces.shared.record($0) }
         )
         let controller = KookyWindowController(windowId: windowId, store: store)
         persistence.frameProvider = { [weak controller] in controller?.persistableFrame }
@@ -1423,13 +1425,46 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         menu.addItem(clear)
     }
 
-    /// One seam for both open-recent entry points (menu item + ⌘P palette)
-    /// so a future behavior change — say, jump to an existing workspace
-    /// instead of adding a duplicate — can't land in one and not the other
-    /// (the `revealTab` precedent).
+    /// One seam for every open-recent entry point (menu item, ⌘P palette,
+    /// sidebar dropdown) so a future behavior change can't land in one and
+    /// not the other (the `revealTab` precedent). If the folder is already
+    /// open as a workspace anywhere, switch to it instead of adding a
+    /// duplicate; otherwise add a new workspace in the active window.
     private func openRecentFolder(atPath path: String) {
         revealHiddenWindow()
-        activeStore?.addWorkspace(workingDirectory: URL(fileURLWithPath: path, isDirectory: true))
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        let targetPath = url.standardizedFileURL.path
+        // Search every window — the already-open workspace may live in a
+        // sibling window, not the active one. `activateOrRestoreWorkspace`
+        // (same seam as a sidebar row click) guarantees the jumped-to
+        // workspace is usable, reopening a tab if it was pinned-empty.
+        for controller in windowControllers {
+            guard let existing = controller.store.workspaces.first(where: {
+                $0.workingDirectory.standardizedFileURL.path == targetPath
+            }) else { continue }
+            if let window = controller.window { front(window) }
+            controller.store.activateOrRestoreWorkspace(existing)
+            return
+        }
+        if let store = activeStore {
+            let workspace = store.addWorkspace(workingDirectory: url)
+            // Restore the identity settings (tag / custom name / pin) of a
+            // previously-closed workspace for this folder, if one was
+            // recorded — closing a project and reopening it shouldn't lose
+            // its colour and name.
+            if let record = ClosedWorkspaces.shared.pop(matching: targetPath) {
+                store.applyClosedWorkspace(record, to: workspace)
+            } else if !url.lastPathComponent.isEmpty {
+                // Pin the label to the folder name. Without this, a
+                // non-path-shaped shell title (`user@host` with no dir, a TUI
+                // name) overrides `Workspace.title` via `terminalTitle`, and
+                // `localTerminalTitle`'s fallback surfaces the FULL path instead
+                // of the project folder. A recent-open workspace is "about" its
+                // folder, so a stable name is correct even if the shell later
+                // reports something else.
+                workspace.customTitle = url.lastPathComponent
+            }
+        }
     }
 
     @objc private func handleOpenRecentFolder(_ sender: NSMenuItem) {
