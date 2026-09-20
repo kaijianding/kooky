@@ -39,6 +39,81 @@ final class TerminalKeyRoutingTests: XCTestCase {
         )
     }
 
+    func testSSHWorkspaceOptionArrowsUseLegacyEscPrefix() {
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 123, modifierFlags: [.option], forSSHWorkspace: true
+            ),
+            "\u{1B}b"
+        )
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 124, modifierFlags: [.option], forSSHWorkspace: true
+            ),
+            "\u{1B}f"
+        )
+        // Local surfaces keep CSI so the wrapper bindkey still matches.
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 123, modifierFlags: [.option]
+            ),
+            "\u{1B}[1;3D"
+        )
+        // Ctrl/Shift combos stay CSI even on SSH workspaces.
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 123, modifierFlags: [.option, .shift], forSSHWorkspace: true
+            ),
+            "\u{1B}[1;4D"
+        )
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 126, modifierFlags: [.option], forSSHWorkspace: true
+            ),
+            "\u{1B}[1;3A"
+        )
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 51, modifierFlags: [.control], forSSHWorkspace: true
+            ),
+            "\u{17}"
+        )
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 117, modifierFlags: [.control], forSSHWorkspace: true
+            ),
+            "\u{1B}d"
+        )
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 51, modifierFlags: [.control]
+            ),
+            "\u{7F}"
+        )
+    }
+
+    func testOptionDeleteKillsWordOnLocalAndSSH() {
+        for ssh in [false, true] {
+            XCTAssertEqual(
+                GhosttySurfaceView.handWrittenEscapeSequence(
+                    forKeyCode: 51, modifierFlags: [.option], forSSHWorkspace: ssh
+                ),
+                "\u{17}"
+            )
+            XCTAssertEqual(
+                GhosttySurfaceView.handWrittenEscapeSequence(
+                    forKeyCode: 117, modifierFlags: [.option], forSSHWorkspace: ssh
+                ),
+                "\u{1B}d"
+            )
+        }
+    }
+
+
+
+
+
+
     func testViewportAtBottomDetection() {
         // ghostty's scrollbar offset is measured from the top; the bottom
         // (active area) is offset + len == total. This predicate gates the
