@@ -1358,10 +1358,14 @@ final class GhosttySurfaceView: NSView {
             default:  break
             }
         }
-        if mods.contains(.option), !cmd, !mods.contains(.control), event.keyCode == 51 {
-            sendInputBytes("\u{17}", to: surface)                    // Option+⌫ → ^W
-            return
+        if mods.contains(.option), !cmd, !mods.contains(.control) {
+            switch event.keyCode {
+            case 51:  sendInputBytes("\u{17}", to: surface); return  // Option+⌫ → ^W
+            case 117: sendInputBytes("\u{1B}d", to: surface); return // Option+Del → ESC d
+            default: break
+            }
         }
+
 
         // Any other Cmd+combo: hand off to AppKit's responder chain so menu
         // key equivalents (Cmd+W close, Cmd+T new tab — when M4 wires them)
@@ -1380,7 +1384,11 @@ final class GhosttySurfaceView: NSView {
         if !hasMarkedText(),
            Self.shouldForwardModeAwareKeyToLibghostty(keyCode: event.keyCode, modifierFlags: mods) {
             if !sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface),
-               let bytes = Self.handWrittenEscapeSequence(forKeyCode: event.keyCode, modifierFlags: mods) {
+               let bytes = Self.handWrittenEscapeSequence(
+                    forKeyCode: event.keyCode,
+                    modifierFlags: mods,
+                    forSSHWorkspace: pasteUploadHostProvider?() != nil
+               ) {
                 sendInputBytes(bytes, to: surface)
             }
             return
@@ -1390,7 +1398,11 @@ final class GhosttySurfaceView: NSView {
         // while IME is composing so Enter / Esc / arrows can dismiss / accept
         // the candidate window without leaking through to the PTY.
         if !hasMarkedText(),
-           let bytes = Self.handWrittenEscapeSequence(forKeyCode: event.keyCode, modifierFlags: mods) {
+           let bytes = Self.handWrittenEscapeSequence(
+                forKeyCode: event.keyCode,
+                modifierFlags: mods,
+                forSSHWorkspace: pasteUploadHostProvider?() != nil
+           ) {
             sendInputBytes(bytes, to: surface)
             return
         }
@@ -1581,10 +1593,49 @@ final class GhosttySurfaceView: NSView {
     /// Map kooky's own functional-key policy to bytes. Returns `nil` for
     /// normal text; for the mode-aware keys `keyDown` forwards to
     /// `ghostty_surface_key` this is the decline fallback only.
+    ///
+    /// SSH workspaces encode Option+←/→ as legacy `ESC b` / `ESC f` so
+    /// remote bash/zsh (and nested ssh hops) jump words without CSI
+    /// bindings. Local surfaces keep CSI 1;3 so the local wrapper's
+    /// bindkey stays valid. Ctrl/Shift combos stay CSI on both, except
+    /// Ctrl+⌫ / Ctrl+ForwardDelete which become `^W` / `ESC d` (zsh/bash
+    /// default kill-word) — CSI 3;5~ is unbound remotely.
+    /// Option+⌫ is `^W` on every surface. Option+Del (Forward Delete)
+    /// is `ESC d` — same as Ctrl+Del — kill-word after the cursor.
     nonisolated static func handWrittenEscapeSequence(
         forKeyCode code: UInt16,
-        modifierFlags mods: NSEvent.ModifierFlags
+        modifierFlags mods: NSEvent.ModifierFlags,
+        forSSHWorkspace: Bool = false
     ) -> String? {
+        let optionOnly = mods.contains(.option)
+            && !mods.contains(.shift)
+            && !mods.contains(.control)
+        let controlOnly = mods.contains(.control)
+            && !mods.contains(.shift)
+            && !mods.contains(.option)
+        if optionOnly {
+            switch code {
+            case 51:  return "\u{17}"    // Option+⌫ → ^W
+            case 117: return "\u{1B}d"   // Option+Del → ESC d
+            default: break
+            }
+        }
+        if forSSHWorkspace, optionOnly {
+            switch code {
+            case 123: return "\u{1B}b"   // Option+← → ESC b
+            case 124: return "\u{1B}f"   // Option+→ → ESC f
+            default: break
+            }
+        }
+        if forSSHWorkspace, controlOnly {
+            switch code {
+            case 51:  return "\u{17}"    // Ctrl+⌫ → ^W backward-kill-word
+            case 117: return "\u{1B}d"   // Ctrl+Del → ESC d kill-word
+            default: break
+            }
+        }
+
+
         let modDigit = csiModifierDigit(shift: mods.contains(.shift),
                                         alt: mods.contains(.option),
                                         ctrl: mods.contains(.control))
