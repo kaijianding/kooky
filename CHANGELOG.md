@@ -10,19 +10,10 @@ Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 - Fixed: a collapsed project stays collapsed across sidebar hides, file-tree switches, and relaunches.
 - Changed: a project cannot be renamed — the folder's name is the project's name, so two rows can never claim the same folder.
 - Changed: Open Recent (File menu and ⌘P) is project-oriented. Picking a folder you already have shows the project it already is — unfolding it and focusing its first workspace — instead of adding a duplicate row; a new folder becomes a project with one workspace.
+- New: window background image — Settings → Appearance picks a PNG or JPEG drawn once behind the whole window (sidebar and terminal share it). Fit defaults to cover and image opacity to 50%; the terminal shows it through `background-opacity`.
 
 ## v0.51.12 — 2026-10-12
 
-- New: keyboard shortcuts that match Ghostty, Warp and cmux. ⌥⌘ + arrow moves focus to the split in that direction, ⌃⌘ + arrow moves the nearest divider, and ⌘Home / ⌘End / ⌘Page Up / ⌘Page Down scroll the terminal to the top, to the bottom, or by a page — following your Ghostty config if you've rebound them.
-- New: ⌃⌘[ / ⌃⌘] step to the previous / next workspace, wrapping at the ends. The sidebar scrolls to the workspace you land on and unfolds its group if it was collapsed. Thanks @kaijianding for the idea and a draft implementation. (#84)
-- Changed: ⌘9 now jumps to the last tab, as in Ghostty, Warp and browsers.
-- New: hide sessions from the History panel. Hover a row and click the eye to hide it; "show hidden" brings them back so you can restore them. kooky only remembers what you hid — the agents' own conversation data is never touched. Thanks @kaijianding for the idea and a draft implementation. (#83)
-- Fixed: running `omp update` inside kooky now updates omp itself. omp used to mistake kooky's launcher for its own program and overwrite it, so the update didn't stick and the agent's status dot went dark until kooky restarted. Thanks @kaijianding for the diagnosis and a draft fix. (#82)
-
-## v0.51.11 — 2026-09-23
-
-- Fixed: switching Node versions or Git branches, or unsetting proxy variables from the status bar preserves unfinished shell input and the cursor position, even when you keep typing during the switch. Actions run in the current zsh, bash, or fish session without mixing commands with your input or executing unfinished text. Proxy unsetting clears both lowercase and uppercase variables, supports fish, and leaves other terminals' settings alone.
-- Fixed: zsh prompts refresh after a status-bar switch, so cached version and branch information stays current. macOS Bash 3.2 preserves your input but refreshes its cached prompt on the next normal command submission.
 - Changed: bundled themes now live in individual Ghostty-style files, making new themes easier to add while preserving all existing colors and theme selections. Palette entries keep their explicit color indices regardless of line order. Thanks @kaijianding for the refactor. (#77)
 - Fixed: closing an agent tab or quitting kooky keeps terminal I/O available while the foreground processes finish their shutdown hooks and cleanup, avoiding unnecessary waits caused by stopping I/O first. Cleanup waits for the whole foreground process group, with a bounded grace period and forced termination for unresponsive processes. Thanks @kaijianding for the diagnosis and initial fix. (#76)
 

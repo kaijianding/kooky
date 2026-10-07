@@ -92,6 +92,35 @@ final class KookySettingsUserThemeTests: XCTestCase {
         XCTAssertNotEqual(value("selection-foreground", in: config), "#654321")
     }
 
+    func testBackgroundImageIsWindowWallpaperNotForwardedToGhostty() throws {
+        _ = LibghosttyApp.shared
+        let path = "/tmp/wall paper #1.png"
+        let config = try XCTUnwrap(ghostty_config_new())
+        defer { ghostty_config_free(config) }
+        KookySettings.apply(
+            parsed: [
+                "terminal": [
+                    "background-image": path,
+                    "background-image-fit": "cover",
+                    "background-image-opacity": 0.4,
+                ]
+            ],
+            to: config,
+            themes: []
+        )
+        ghostty_config_finalize(config)
+
+        let text = serialized(config)
+        XCTAssertFalse(text.contains(path), "window wallpaper must not be forwarded to libghostty")
+        XCTAssertFalse(text.contains("wall paper"))
+        let imageValue = unquoted(value("background-image", in: config)) ?? ""
+        XCTAssertTrue(imageValue.isEmpty, "expected empty background-image to clear inherit, got \(imageValue)")
+        // Ghostty's own defaults — proving kooky's cover/0.4 were not forwarded.
+        XCTAssertEqual(value("background-image-fit", in: config), "contain")
+        XCTAssertEqual(value("background-image-opacity", in: config), "1")
+        XCTAssertEqual(value("background-opacity", in: config), "\(Theme.defaultWallpaperOpacity)")
+    }
+
     private func parsed(
         theme: String,
         terminal: [String: Any] = [:]
@@ -127,6 +156,14 @@ final class KookySettingsUserThemeTests: XCTestCase {
             .map { String($0.dropFirst(prefix.count)) }
     }
 
+
+    private func unquoted(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        guard raw.count >= 2, raw.first == "\"", raw.last == "\"" else { return raw }
+        return String(raw.dropFirst().dropLast())
+            .replacingOccurrences(of: "\\\"", with: "\"")
+            .replacingOccurrences(of: "\\\\", with: "\\")
+    }
     private func serialized(_ config: ghostty_config_t) -> String {
         let value = ghostty_config_serialize(config)
         defer { ghostty_string_free(value) }

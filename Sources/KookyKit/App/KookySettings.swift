@@ -49,7 +49,7 @@ enum KookySettings {
         "darkTheme": "\(KookyTerminalTheme.defaultDarkStoredValue)"
       },
 
-      // === Terminal rendering (forwarded to libghostty) ===
+      // === Terminal rendering (forwarded to libghostty, except wallpaper) ===
       // ghostty key reference: https://ghostty.org/docs/config/reference
       "terminal": {
         // "font-family": "JetBrains Mono",
@@ -57,6 +57,10 @@ enum KookySettings {
         // "background-opacity": 0.85,
         // macOS 26+: "macos-glass-regular" | "macos-glass-clear" for Liquid Glass
         // "background-blur": "macos-glass-regular"
+        // Window wallpaper — drawn once by kooky, not forwarded to ghostty
+        // "background-image": "/path/to/wallpaper.png",
+        // "background-image-fit": "cover",
+        // "background-image-opacity": 0.5,
       }
     }
     """
@@ -120,9 +124,16 @@ enum KookySettings {
             }
         }
         for key in terminal.keys.sorted() where key != "theme" {
+            if chromeOnlyTerminalKeys.contains(key) { continue }
             if let value = terminal[key] {
                 lines.append(contentsOf: formatGhosttyLines(key: key, value: value))
             }
+        }
+        let hasWallpaper = wallpaperPath(from: terminal) != nil
+        if hasWallpaper {
+            // Empty path disables an inherited ghostty per-surface image so
+            // kooky's single window wallpaper is the only copy.
+            lines.append("background-image = \"\"")
         }
         // Derive the terminal surface opacity from the glass blur when the user
         // set no explicit `background-opacity`, so every path behaves the same
@@ -131,13 +142,23 @@ enum KookySettings {
         // glass to read through, while kooky's "off" (`false`) forces it fully
         // opaque — otherwise an inherited ghostty `background-opacity` would
         // leave the terminal see-through with the glass gone.
-        if terminal["background-opacity"] == nil, let blur = blurString(from: terminal["background-blur"]) {
-            if isGlassBlur(blur) {
-                lines.append("background-opacity = \(Theme.defaultGlassOpacity)")
-            } else if isBlurExplicitlyOff(blur) {
-                lines.append("background-opacity = 1")
+        // Wallpaper has the same need: without an explicit opacity the cells
+        // would stay opaque and hide the window image.
+        if terminal["background-opacity"] == nil {
+            if hasWallpaper {
+                if let blur = blurString(from: terminal["background-blur"]), isGlassBlur(blur) {
+                    lines.append("background-opacity = \(Theme.defaultGlassOpacity)")
+                } else {
+                    lines.append("background-opacity = \(Theme.defaultWallpaperOpacity)")
+                }
+            } else if let blur = blurString(from: terminal["background-blur"]) {
+                if isGlassBlur(blur) {
+                    lines.append("background-opacity = \(Theme.defaultGlassOpacity)")
+                } else if isBlurExplicitlyOff(blur) {
+                    lines.append("background-opacity = 1")
+                }
+                // A ghostty-native numeric blur — leave opacity alone.
             }
-            // A ghostty-native numeric blur — leave opacity alone.
         }
         loadGhosttyLines(lines, sourceName: "kooky-settings", into: config)
     }
@@ -317,6 +338,23 @@ enum KookySettings {
                 : num.stringValue
         }
         return nil
+    }
+
+    /// Keys stored under `terminal.*` but consumed by kooky chrome, not
+    /// libghostty. `background-image*` is a single window wallpaper; sending
+    /// the path to ghostty would allocate a second per-surface copy.
+    private static let chromeOnlyTerminalKeys: Set<String> = [
+        "background-image",
+        "background-image-opacity",
+        "background-image-fit",
+        "background-image-position",
+        "background-image-repeat",
+    ]
+
+    private static func wallpaperPath(from terminal: [String: Any]) -> String? {
+        guard let path = terminal["background-image"] as? String else { return nil }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func formatGhosttyLines(key: String, value: Any) -> [String] {

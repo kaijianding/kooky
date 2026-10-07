@@ -13,4 +13,12 @@
 "chrome-background-mix" = "Chrome background mix";
 "Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default." = "Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default.";
 "Maximum tab width in pixels. Values are capped at 200px." = "Maximum tab width in pixels. Values are capped at 200px.";
-"Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top." = "Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top.";
+"background-image" = "Background image";
+"background-image-fit" = "Background image fit";
+"background-image-opacity" = "Background image opacity";
+"Contain" = "Contain";
+"Cover" = "Cover";
+"Stretch" = "Stretch";
+"One image for the whole window. The sidebar and terminal both show it — Ghostty does not keep a copy per tab." = "One image for the whole window. The sidebar and terminal both show it — Ghostty does not keep a copy per tab.";
+"Choose a background image." = "Choose a background image.";
+"Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top. With a background image the window stays opaque: this slider then controls how strongly the theme covers the image in the terminal." = "Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top. With a background image the window stays opaque: this slider then controls how strongly the theme covers the image in the terminal.";
