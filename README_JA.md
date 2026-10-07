@@ -98,7 +98,7 @@ AI コーディングのために作られた、ミニマルでモダンな macO
 
 **Light + Dark のペアテーマ。** Light 用と Dark 用の terminal 配色をそれぞれ選び、System / Light / Dark の外観モードは別に設定できます。System は macOS の変更にリアルタイムで追従し、terminal とウィンドウ全体を同時に切り替えます。40 種類以上の組み込み配色には **Ghostty Dark**、Ayu、Catppuccin、Everforest、GitHub、Gruvbox、Material、Night Owl、Nord、Rosé Pine のほか、Codex Desktop でも使われているオープンソーステーマが含まれます。`~/.config/ghostty/themes` のカスタムテーマは背景色に応じて Light または Dark の picker に自動表示されます。組み込みテーマの設定値には `kooky:` 名前空間を使うため、同名の Ghostty カスタムテーマもアップグレード後にそのまま維持されます。以前の Default の挙動も維持され、テーマを選んだことがない場合は Appearance を変更するまで Ghostty の設定を引き継ぎます。 ターミナル内のプログラムが「背景は暗い?」と問い合わせると(nvim の background 自動検出、delta)、現在の kooky テーマに基づく答えが返ります。引き継いだ Ghostty 設定の `theme = light:X,dark:Y` 条件テーマも正しく解決されます。
 
-**設定可能。** Settings (`⌘,`) ではフォント、カーソル、背景の不透明度(liquid-glass または数値の `background-blur` と組み合わせると、どの macOS でも伝統的なすりガラス表現になります)、デフォルトの新規 tab 挙動、Terminal preset、agents、Open in、pane ステータスバーも調整できます。`confirm-close-surface` をオンにすると、プロセスが動作中の tab を閉じる前に確認が入ります。外観の変更は開いているすべてのウィンドウに即時反映されます。
+**設定可能。** Settings (`⌘,`) ではフォント、カーソル、背景の不透明度(liquid-glass または数値の `background-blur` と組み合わせると、どの macOS でも伝統的なすりガラス表現になります)、ウィンドウ背景画像（ウィンドウ全体で1枚）、デフォルトの新規 tab 挙動、Terminal preset、agents、Open in、pane ステータスバーも調整できます。`confirm-close-surface` をオンにすると、プロセスが動作中の tab を閉じる前に確認が入ります。外観の変更は開いているすべてのウィンドウに即時反映されます。
 
 **ディープリンク。** 他のアプリから kooky で agent の会話を再開できます。`kooky://resume?agent=<agent>&id=<会話id>[&cwd=<パス>]` は、会話がすでに開いていればその tab へジャンプし、なければ会話のプロジェクトディレクトリで新しい tab として再開します（`agent` は History パネルと同じ id を受け付けます: `claude-code`、`codex`、`copilot`、`cursor`、`opencode`、`kiro`、`gemini` など）。オプションの `cwd` を付けると、セッションスキャンの保持範囲より古い会話も再開できます。会話 id は厳密に検証され、リンクからプロンプトやコマンドは渡せません。拒否されたリンクは理由をシートで表示します。`cwd` のスペースは `%20` でエンコードしてください（`+` はデコードされません）。
 

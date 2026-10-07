@@ -143,15 +143,28 @@ enum Theme {
     /// read it. Tune on macOS 26 hardware.
     nonisolated static let defaultGlassOpacity: Double = 0.82
 
-    /// `background-opacity` clamped to a visible range. Drives the glass tint;
+    /// Terminal opacity applied when a window wallpaper is on but the user set
+    /// no explicit `background-opacity`. Lower than glass: the image has to
+    /// read through the cells, and 0.82 would nearly hide it.
+    /// `nonisolated` to match `defaultGlassOpacity`.
+    nonisolated static let defaultWallpaperOpacity: Double = 0.55
+
+    /// Opacity of the window wallpaper image when `background-image-opacity`
+    /// is unset. 50% keeps the theme readable without requiring a second
+    /// slider move after picking a photo.
+    nonisolated static let defaultBackgroundImageOpacity: Double = 0.5
+
+    /// `background-opacity` clamped to 0...1. Drives the glass tint;
     /// also the value libghostty draws the terminal surface at. Defaults to
     /// 0.82 when a glass mode is on but no opacity was set, so the effect
     /// shows without the user also having to hand-set opacity.
     static var backgroundOpacity: Double {
         let raw = KookySettingsModel.shared.backgroundOpacity
             ?? ghosttyFallback.opacity
-            ?? (glassEnabled ? defaultGlassOpacity : 1)
-        return max(0.001, min(1, raw))
+            ?? (glassEnabled ? defaultGlassOpacity
+                : hasWallpaper ? defaultWallpaperOpacity
+                : 1)
+        return max(0, min(1, raw))
     }
 
     /// Tint the window glass leans toward — the terminal background at
@@ -188,6 +201,19 @@ enum Theme {
     static var glassPanelTint: Color {
         let opacity: Double = glassStyle == .clear ? 0.40 : 0.60
         return Color(nsColor: resolved.backgroundColor).opacity(opacity)
+    }
+
+    /// Whether kooky is drawing a window wallpaper. Registers the
+    /// `@Observable` dependency on the path so chrome re-renders live.
+    static var hasWallpaper: Bool {
+        KookySettingsModel.shared.backgroundImage != nil
+    }
+
+    /// Chrome panels sit in front of the single window wallpaper, so they use
+    /// a translucent theme tint (a bit more solid than regular glass) rather
+    /// than an opaque fill. Glass mode still uses `glassPanelTint`.
+    static var wallpaperPanelTint: Color {
+        Color(nsColor: resolved.backgroundColor).opacity(0.72)
     }
 
     /// `~/.config/ghostty/config` `background-blur` / `background-opacity`,

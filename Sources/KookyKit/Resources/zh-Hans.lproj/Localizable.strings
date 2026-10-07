@@ -46,6 +46,14 @@
 "cursor-style" = "光标样式";
 "liquid-glass" = "液态玻璃";
 "background-opacity" = "背景透明度";
+"background-image" = "背景图片";
+"background-image-fit" = "背景图片适配";
+"background-image-opacity" = "背景图片透明度";
+"Contain" = "完整显示";
+"Cover" = "铺满";
+"Stretch" = "拉伸";
+"One image for the whole window. The sidebar and terminal both show it — Ghostty does not keep a copy per tab." = "整窗共用一张图。侧栏和终端看到的是同一张，Ghostty 不会按标签页各存一份。";
+"Choose a background image." = "选择一张背景图片。";
 "chrome-background-mix" = "界面背景混色";
 "show-search-pill" = "显示搜索入口";
 "show-agent-panel-tag" = "显示智能体面板标签";
@@ -67,7 +75,7 @@
 "Work" = "工作";
 "Selecting text copies it to the clipboard immediately." = "选中文本后立即复制到剪贴板。";
 "Requires macOS 26 or later." = "需要 macOS 26 或更高版本。";
-"Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top." = "窗口透明度 — 低于 100% 时整个终端窗口在任意 macOS 上均可透视；液态玻璃与背景模糊在此基础上增加磨砂效果。";
+"Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top. With a background image the window stays opaque: this slider then controls how strongly the theme covers the image in the terminal." = "窗口透明度 — 低于 100% 时整个终端窗口在任意 macOS 上均可透视；液态玻璃与背景模糊在此基础上增加磨砂效果。有背景图片时窗口保持不透明，此滑块改为控制主题色覆盖图片的程度。";
 "Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default." = "深色界面背景向黑色混合的比例。0% 使用未经调整的主题背景；默认值为 16%。";
 "max-tab-width" = "标签页最大宽度";
 "Maximum tab width in pixels. Values are capped at 200px." = "标签页最大宽度（像素）。最大限制为 200px。";
