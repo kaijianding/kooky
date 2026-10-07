@@ -150,6 +150,14 @@ final class KookySettingsModel {
     /// `terminal.background-opacity` (0...1). Drives both libghostty's surface
     /// alpha and kooky's glass tint. `nil` = unset (libghostty default).
     var backgroundOpacity: Double? = nil
+    /// Absolute path of the window wallpaper PNG/JPEG. Drawn once by
+    /// `GlassWindowBacking`; not forwarded to libghostty. nil = no image.
+    var backgroundImage: String? = nil
+    /// Opacity of that single window image (0...1). nil = 50%
+    /// (`Theme.defaultBackgroundImageOpacity`).
+    var backgroundImageOpacity: Double? = nil
+    /// Fit of that single window image: contain / cover / stretch. nil = cover.
+    var backgroundImageFit: String? = nil
     /// Maximum width of a tab item in pixels. The setting is app-specific and
     /// capped so a long title cannot consume the whole tab strip.
     var tabMaxWidth: Int = KookySettingsModel.defaultTabMaxWidth
@@ -388,6 +396,15 @@ final class KookySettingsModel {
         } else {
             backgroundOpacity = nil
         }
+        backgroundImage = Self.resolvedBackgroundImage(terminal["background-image"])
+        if let o = terminal["background-image-opacity"] as? Double {
+            backgroundImageOpacity = o
+        } else if let i = terminal["background-image-opacity"] as? Int {
+            backgroundImageOpacity = Double(i)
+        } else {
+            backgroundImageOpacity = nil
+        }
+        backgroundImageFit = Self.resolvedBackgroundImageFit(terminal["background-image-fit"])
         chromeBackgroundMix = Self.resolvedChromeBackgroundMix(appearance["chromeBackgroundMix"])
         let themePreferences = Self.themePreferences(
             appearance: appearance,
@@ -595,6 +612,9 @@ final class KookySettingsModel {
         )
         terminal["background-blur"] = backgroundBlur
         terminal["background-opacity"] = backgroundOpacity
+        terminal["background-image"] = backgroundImage
+        terminal["background-image-opacity"] = backgroundImageOpacity
+        terminal["background-image-fit"] = backgroundImageFit
         // Explicit legacy themes can migrate losslessly to their matching
         // side. A missing legacy theme is different: it was the old Default
         // sentinel and must keep inheriting Ghostty until the user edits an
@@ -749,10 +769,11 @@ final class KookySettingsModel {
         // template change, and this already runs behind the save debounce.
         onAgentTemplatesChanged()
         KookyShellIntegration.refreshSshRemoteAgentDetection(enabled: sshRemoteAgentDetection)
-        // Theme, appearance mode, or glass (blur / opacity) diff triggers the chrome /
-        // window-appearance refresh — font and cursor changes also flow
-        // through `reloadConfig` so libghostty picks up the new values, but
-        // they don't change chrome tokens, so skip the window pass for them.
+        // Theme, appearance mode, or glass (blur / opacity / wallpaper) diff
+        // triggers the chrome / window-appearance refresh — font and cursor
+        // changes also flow through `reloadConfig` so libghostty picks up the
+        // new values, but they don't change chrome tokens, so skip the window
+        // pass for them.
         let appearanceThemeChanged = (previousAppearance["mode"] as? String) != (appearance["mode"] as? String)
             || (previousAppearance["lightTheme"] as? String) != (appearance["lightTheme"] as? String)
             || (previousAppearance["darkTheme"] as? String) != (appearance["darkTheme"] as? String)
@@ -762,6 +783,9 @@ final class KookySettingsModel {
             || appearanceThemeChanged
         let glassChanged = (previousTerminal["background-blur"] as? String) != (terminal["background-blur"] as? String)
             || (previousTerminal["background-opacity"] as? NSNumber) != (terminal["background-opacity"] as? NSNumber)
+            || (previousTerminal["background-image"] as? String) != (terminal["background-image"] as? String)
+            || (previousTerminal["background-image-fit"] as? String) != (terminal["background-image-fit"] as? String)
+            || (previousTerminal["background-image-opacity"] as? NSNumber) != (terminal["background-image-opacity"] as? NSNumber)
         let terminalChanged = !NSDictionary(dictionary: previousTerminal).isEqual(to: terminal)
         if terminalChanged || appearanceThemeChanged {
             LibghosttyApp.shared.reloadConfig()
@@ -831,6 +855,18 @@ final class KookySettingsModel {
     /// last-write-wins — the LAST element is the effective value.
     private static func lastGhosttyValue(_ raw: Any?) -> Any? {
         (raw as? [Any])?.last ?? raw
+    }
+
+    private static func resolvedBackgroundImage(_ raw: Any?) -> String? {
+        guard let path = lastGhosttyValue(raw) as? String else { return nil }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func resolvedBackgroundImageFit(_ raw: Any?) -> String? {
+        guard let fit = lastGhosttyValue(raw) as? String else { return nil }
+        let trimmed = fit.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// ghostty's `copy-on-select` is an enum (`false` / `true` / `clipboard`)
@@ -1181,6 +1217,9 @@ struct KookySettingsView: View {
             .onChange(of: model.darkTerminalThemeSelection) { _, _ in model.activatePairedThemeSchemaAndSave() }
             .onChange(of: model.backgroundBlur) { _, _ in model.flushSave() }
             .onChange(of: model.backgroundOpacity) { _, _ in model.scheduleSave() }
+            .onChange(of: model.backgroundImage) { _, _ in model.flushSave() }
+            .onChange(of: model.backgroundImageOpacity) { _, _ in model.scheduleSave() }
+            .onChange(of: model.backgroundImageFit) { _, _ in model.scheduleSave() }
             .onChange(of: model.tabMaxWidth) { _, _ in model.scheduleSave() }
         let secondAutosave = firstAutosave
             .onChange(of: model.chromeBackgroundMix) { _, _ in model.scheduleSave() }
@@ -1411,11 +1450,71 @@ struct KookySettingsView: View {
                             .foregroundStyle(Theme.chromeForeground)
                             .monospacedDigit()
                             .frame(width: 40, alignment: .trailing)
-                        Slider(value: backgroundOpacityBinding, in: 0.3...1.0, step: 0.01)
+                        Slider(value: backgroundOpacityBinding, in: 0...1.0, step: 0.01)
                             .frame(width: 140)
                     }
                 }
-                SettingsCaption("Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top.")
+                SettingsCaption("Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top. With a background image the window stays opaque: this slider then controls how strongly the theme covers the image in the terminal.")
+                SettingsHairline()
+                SettingsRow(label: "background-image") {
+                    HStack(spacing: 8) {
+                        if let path = model.backgroundImage {
+                            Text(URL(fileURLWithPath: path).lastPathComponent)
+                                .font(Theme.mono(11))
+                                .foregroundStyle(Theme.chromeForeground)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: 140, alignment: .trailing)
+                        }
+                        Button(action: chooseBackgroundImage) {
+                            Text(String(localized: "choose…", bundle: .kookyResources))
+                                .font(Theme.mono(11))
+                                .foregroundStyle(Theme.chromeForeground)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .contentShape(Rectangle())
+                                .bracketBorder()
+                        }
+                        .buttonStyle(.plain)
+                        if model.backgroundImage != nil {
+                            Button(String(localized: "clear", bundle: .kookyResources)) {
+                                model.backgroundImage = nil
+                                model.backgroundImageOpacity = nil
+                                model.backgroundImageFit = nil
+                            }
+                            .buttonStyle(.plain)
+                            .font(Theme.mono(11))
+                            .foregroundStyle(Theme.chromeMuted)
+                            .underline()
+                        }
+                    }
+                }
+                SettingsCaption("One image for the whole window. The sidebar and terminal both show it — Ghostty does not keep a copy per tab.")
+                if model.backgroundImage != nil {
+                    SettingsHairline()
+                    SettingsRow(label: "background-image-fit") {
+                        Picker("", selection: backgroundImageFitBinding) {
+                            Text(String(localized: "Cover", bundle: .kookyResources)).tag("cover")
+                            Text(String(localized: "Contain", bundle: .kookyResources)).tag("contain")
+                            Text(String(localized: "Stretch", bundle: .kookyResources)).tag("stretch")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(minWidth: 180, alignment: .trailing)
+                    }
+                    SettingsHairline()
+                    SettingsRow(label: "background-image-opacity") {
+                        HStack(spacing: 8) {
+                            Text(backgroundImageOpacityLabel)
+                                .font(Theme.mono(12))
+                                .foregroundStyle(Theme.chromeForeground)
+                                .monospacedDigit()
+                                .frame(width: 40, alignment: .trailing)
+                            Slider(value: backgroundImageOpacityBinding, in: 0...1, step: 0.01)
+                                .frame(width: 140)
+                        }
+                    }
+                }
                 SettingsHairline()
                 SettingsRow(label: "max-tab-width") {
                     HStack(spacing: 8) {
@@ -1762,6 +1861,34 @@ struct KookySettingsView: View {
     private var backgroundOpacityLabel: String {
         "\(Int((effectiveBackgroundOpacity * 100).rounded()))%"
     }
+
+    private var backgroundImageFitBinding: Binding<String> {
+        Binding(
+            get: { model.backgroundImageFit ?? "cover" },
+            set: { model.backgroundImageFit = $0 == "cover" ? nil : $0 }
+        )
+    }
+
+    private var effectiveBackgroundImageOpacity: Double {
+        model.backgroundImageOpacity ?? Theme.defaultBackgroundImageOpacity
+    }
+
+    private var backgroundImageOpacityBinding: Binding<Double> {
+        Binding(
+            get: { effectiveBackgroundImageOpacity },
+            set: {
+                let rounded = ($0 * 100).rounded() / 100
+                let next: Double? = rounded == Theme.defaultBackgroundImageOpacity ? nil : rounded
+                if next != model.backgroundImageOpacity {
+                    model.backgroundImageOpacity = next
+                }
+            }
+        )
+    }
+
+    private var backgroundImageOpacityLabel: String {
+        "\(Int((effectiveBackgroundImageOpacity * 100).rounded()))%"
+    }
     private var chromeBackgroundMixBinding: Binding<Double> {
         Binding(
             get: { model.chromeBackgroundMix },
@@ -1805,6 +1932,24 @@ struct KookySettingsView: View {
             }
             .sorted()
     }()
+
+    private func chooseBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.message = String(localized: "Choose a background image.", bundle: .kookyResources)
+        panel.directoryURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+        KookySettingsWindowController.shared.present(panel) { url in
+            model.backgroundImage = url.standardizedFileURL.path
+            // Opaque cells would hide the window image; write a see-through
+            // default so the slider matches what the terminal actually draws.
+            if model.backgroundOpacity == nil || (model.backgroundOpacity ?? 1) >= 0.995 {
+                model.backgroundOpacity = Theme.defaultWallpaperOpacity
+            }
+        }
+    }
 
 }
 

@@ -98,7 +98,7 @@
 
 **Light + Dark 双主题。** Light 和 Dark 可以各选一套 terminal 配色，再单独选择 System / Light / Dark 外观模式。System 会实时跟随 macOS，同时切换 terminal 和整个窗口。40 多套内置配色包括 **Ghostty Dark**、Ayu、Catppuccin、Everforest、GitHub、Gruvbox、Material、Night Owl、Nord、Rosé Pine，以及 Codex Desktop 也在使用的其他开源主题；放在 `~/.config/ghostty/themes` 的自定义主题会按背景颜色自动出现在对应的 Light 或 Dark 下拉框。内置主题设置使用 `kooky:` 命名空间，因此升级后也不会覆盖同名的 Ghostty 自定义主题。老用户升级时仍保留原本的 Default 行为：如果以前没有选过主题，kooky 会继续继承 Ghostty 配置，直到你主动修改 Appearance。 终端里的程序询问「现在是暗色吗」(nvim 的 background 自动检测、delta)会得到你当前 kooky 主题的答案;继承的 Ghostty 配置里 `theme = light:X,dark:Y` 条件主题也能正确解析。
 
-**可配置。** Settings 面板（`⌘,`）还可以调字体、光标、背景透明度（搭配 liquid-glass 或数字 `background-blur`,任何 macOS 版本都能拥有传统毛玻璃）、默认新 tab 行为、Terminal 预设、agents、Open in 和 pane 底部状态栏。开启 `confirm-close-surface` 后,关闭有进程在跑的 tab 会先确认。外观修改会立即同步到所有已打开的窗口。
+**可配置。** Settings 面板（`⌘,`）还可以调字体、光标、背景透明度（搭配 liquid-glass 或数字 `background-blur`,任何 macOS 版本都能拥有传统毛玻璃）、窗口背景图片（整窗共用一张）、默认新 tab 行为、Terminal 预设、agents、Open in 和 pane 底部状态栏。开启 `confirm-close-surface` 后,关闭有进程在跑的 tab 会先确认。外观修改会立即同步到所有已打开的窗口。
 
 **深层链接。** 其他应用可以在 kooky 里重新打开一个 agent 会话：`kooky://resume?agent=<agent>&id=<会话id>[&cwd=<路径>]` 在会话已打开时直接跳到对应 tab，否则在会话自己的项目目录里新开一个 tab 恢复（`agent` 与 History 面板使用同一套 id：`claude-code`、`codex`、`copilot`、`cursor`、`opencode`、`kiro`、`gemini` 等）。可选的 `cwd` 让链接也能恢复超出会话扫描保留范围的更早会话。会话 id 严格校验，链接无法携带 prompt 或命令；被拒绝的链接会用弹窗说明原因。`cwd` 里的空格必须编码为 `%20`（`+` 不会被解码）。
 
