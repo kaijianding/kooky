@@ -755,6 +755,42 @@ final class AgentSessionScannerTests: XCTestCase {
         XCTAssertEqual(remaining.map(\.conversationId), ["22222222-2222-2222-2222-222222222222"])
     }
 
+    func testDeleteSucceedsWhenSessionFileAlreadyGone() throws {
+        // The history row outlives the transcript whenever the agent CLI (or
+        // a manual `rm`) removes it behind Kooky's back. Deleting that stale
+        // row must succeed — "already gone" is the desired end state, not an
+        // error to surface in the confirm sheet.
+        let root = tempDir.appendingPathComponent("delete-already-gone")
+        let project = root.appendingPathComponent("proj-hash")
+        let id = "33333333-3333-3333-3333-333333333333"
+        let target = try writeFile("\(id).jsonl", in: project, lines: [
+            claudeUserLine(text: "gone", cwd: "/tmp/proj"),
+        ])
+        let record = try XCTUnwrap(AgentSessionScanner.claudeRecord(file: target, mtime: Date()))
+        try FileManager.default.removeItem(at: target)
+
+        XCTAssertTrue(AgentSessionScanner.delete(record),
+                      "an already-deleted session is a successful delete")
+    }
+
+    func testDeleteSucceedsWhenSQLiteStoreIsGone() throws {
+        // Same rule for row-backed stores: a db pruned between scan and
+        // delete has nothing left to delete.
+        let dbURL = tempDir.appendingPathComponent("gone-opencode.db")
+        let record = AgentSessionRecord(
+            agentId: AgentTemplate.opencode.id,
+            conversationId: "ses_a",
+            title: "gone",
+            cwd: URL(fileURLWithPath: "/tmp/proj"),
+            lastActivity: Date(),
+            sourceURL: dbURL
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dbURL.path))
+
+        XCTAssertTrue(AgentSessionScanner.delete(record),
+                      "a vanished store is a successful delete")
+    }
+
     func testDeleteRemovesClaudeIndexAndBackups() throws {
         let root = tempDir.appendingPathComponent("delete-claude-companions")
         let project = root.appendingPathComponent("proj-hash")
