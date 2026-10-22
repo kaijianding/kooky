@@ -8,8 +8,9 @@ import SwiftUI
 /// dismissing as if nothing went wrong.
 struct ConfirmDeleteSessionSheet: View {
     let record: AgentSessionRecord
-    /// Runs the delete off the main actor; returns success only when the
-    /// backing store entry was actually removed.
+    /// Runs the delete off the main actor; returns `false` only when the
+    /// backing store entry is still there — an entry that was already gone
+    /// counts as deleted, so a stale row never surfaces an error.
     let confirm: @MainActor () async -> Bool
     let dismiss: () -> Void
 

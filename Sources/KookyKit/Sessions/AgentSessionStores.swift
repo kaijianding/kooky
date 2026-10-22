@@ -615,7 +615,11 @@ extension AgentSessionScanner {
     }
 
     /// Deletes the backing store entry for a session and its local companion
-    /// files. The primary record must disappear before returning `true`.
+    /// files. Idempotent: a store entry that is already gone reports success
+    /// (the history row was stale, not the delete), so re-deleting a session
+    /// removed behind Kooky's back never fails. The `/dev/null` sentinel is
+    /// the one exception — there is no source to delete, so the row would
+    /// come back on the next scan and the caller is told nothing happened.
     static func delete(_ record: AgentSessionRecord) -> Bool {
         guard record.sourceURL.path != "/dev/null" else { return false }
         switch record.agentId {
@@ -696,12 +700,16 @@ extension AgentSessionScanner {
         }
         return true
     }
+    /// Returns `true` when the file is gone afterwards, including the case
+    /// where it was already missing (deleted by the agent CLI, a manual `rm`,
+    /// or another Kooky window) — a stale history row must delete quietly.
+    /// An error that leaves the file on disk is still a failure.
     private static func removePrimary(_ url: URL) -> Bool {
         do {
             try FileManager.default.removeItem(at: url)
             return true
         } catch {
-            return false
+            return !FileManager.default.fileExists(atPath: url.path)
         }
     }
 
@@ -771,6 +779,9 @@ extension AgentSessionScanner {
         secondColumn: String? = nil,
         secondValue: String? = nil
     ) -> Bool {
+        // Nothing to delete when the store itself is gone (agent uninstalled,
+        // db pruned between scan and delete): not a failure.
+        guard FileManager.default.fileExists(atPath: root.path) else { return true }
         var db: OpaquePointer?
         guard sqlite3_open_v2(root.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let db else {
             sqlite3_close(db)
