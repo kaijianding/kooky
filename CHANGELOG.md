@@ -6,6 +6,7 @@ Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
 - New: window background image — Settings → Appearance picks a PNG or JPEG drawn once behind the whole window (sidebar and terminal share it). Fit defaults to cover and image opacity to 50%; the terminal shows it through `background-opacity`.
 - Changed: bundled themes now live in individual Ghostty-style files, making new themes easier to add while preserving all existing colors and theme selections. Palette entries keep their explicit color indices regardless of line order. Thanks @kaijianding for the refactor. (#77)
+- Fixed: deleting a session from session history no longer reports "couldn't delete session" when the transcript is already gone (removed by the agent CLI, another window, or a manual `rm`). An already-deleted session now counts as deleted, so the stale row leaves the list instead of failing.
 - Fixed: closing an agent tab or quitting kooky keeps terminal I/O available while the foreground processes finish their shutdown hooks and cleanup, avoiding unnecessary waits caused by stopping I/O first. Cleanup waits for the whole foreground process group, with a bounded grace period and forced termination for unresponsive processes. Thanks @kaijianding for the diagnosis and initial fix. (#76)
 
 ## v0.51.10 — 2026-09-03
