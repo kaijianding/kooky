@@ -225,14 +225,19 @@ enum KookySettings {
     /// Ownership: the caller owns the returned config and must keep it
     /// alive until the NEXT config replaces it, then free it — see
     /// `LibghosttyApp.currentConfig` for why freeing sooner is unsafe.
+    /// `extraLines` are loaded last, after every file and settings source, so
+    /// they win over anything the user could have configured. That ordering is
+    /// what makes them usable as a font-grid re-key (see
+    /// `LibghosttyApp.rebuildFontGridCoalesced`): the throwaway key only works
+    /// if nothing later can put the original value back.
     @MainActor
-    static func makeGhosttyConfig() -> ghostty_config_t? {
-        let config = ghostty_config_new()
-        guard config != nil else { return nil }
+    static func makeGhosttyConfig(extraLines: [String] = []) -> ghostty_config_t? {
+        guard let config = ghostty_config_new() else { return nil }
         ghostty_config_load_default_files(config)
         let parsed = loadParsed()
         applyBaseline(to: config, parsed: parsed)
         apply(parsed: parsed, to: config)
+        loadGhosttyLines(extraLines, sourceName: "kooky-runtime", into: config)
         ghostty_config_finalize(config)
         return config
     }
