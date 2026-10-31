@@ -993,7 +993,7 @@ final class ShellIntegrationTests: XCTestCase {
         pb.writeObjects([URL(fileURLWithPath: "/tmp/some folder/图 one.png") as NSURL])
 
         let upload = try XCTUnwrap(
-            KookyShellIntegration.remotePasteUpload(from: pb, host: "deploy@example.com")
+            KookyShellIntegration.remotePasteUpload(from: pb, target: SSHRemoteTarget(host: "deploy@example.com"))
         )
         let uploaded = await upload()
         let pasted = try XCTUnwrap(uploaded)
@@ -1024,6 +1024,46 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertTrue(recorder.commands[1].1.contains("ControlPath=/tmp/kooky-ssh-%C"))
     }
 
+    func testRemotePasteUploadPassesPortToSSHAndSCP() async throws {
+        final class Recorder: @unchecked Sendable {
+            let lock = NSLock()
+            var commands: [(String, [String])] = []
+            func record(_ exe: String, _ args: [String]) {
+                lock.lock(); defer { lock.unlock() }
+                commands.append((exe, args))
+            }
+        }
+        let recorder = Recorder()
+        KookyShellIntegration.remotePasteProcessRunnerOverride = { exe, args, _ in
+            recorder.record(exe, args)
+            return true
+        }
+        defer { KookyShellIntegration.remotePasteProcessRunnerOverride = nil }
+
+        let pb = makeIsolatedPasteboard()
+        pb.clearContents()
+        pb.writeObjects([URL(fileURLWithPath: "/tmp/note.txt") as NSURL])
+
+        let upload = try XCTUnwrap(
+            KookyShellIntegration.remotePasteUpload(
+                from: pb,
+                target: SSHRemoteTarget(host: "deploy@example.com", port: 2222)
+            )
+        )
+        let pasted = await upload()
+        XCTAssertNotNil(pasted)
+
+        XCTAssertEqual(recorder.commands.count, 2)
+        // ssh spells the port `-p`, scp spells it `-P` — swapping them is a
+        // silent "connect to 22" on whichever half the user does not watch.
+        XCTAssertTrue(hasAdjacentPair(recorder.commands[0].1, "-p", "2222"), "\(recorder.commands[0].1)")
+        XCTAssertTrue(hasAdjacentPair(recorder.commands[1].1, "-P", "2222"), "\(recorder.commands[1].1)")
+        // ...and it must never be folded into the destination: scp would read
+        // `host:2222:/path` as a path containing colons.
+        XCTAssertTrue(recorder.commands[1].1.last?.hasPrefix("deploy@example.com:/tmp/kooky-pastes-") == true)
+        XCTAssertFalse(recorder.commands[1].1.contains("deploy@example.com:2222"))
+    }
+
     func testRemotePasteUploadFailsClosedWhenTransferFails() async throws {
         KookyShellIntegration.remotePasteProcessRunnerOverride = { _, _, _ in false }
         defer { KookyShellIntegration.remotePasteProcessRunnerOverride = nil }
@@ -1033,7 +1073,7 @@ final class ShellIntegrationTests: XCTestCase {
         pb.writeObjects([URL(fileURLWithPath: "/tmp/real-image.png") as NSURL])
 
         let upload = try XCTUnwrap(
-            KookyShellIntegration.remotePasteUpload(from: pb, host: "deploy@example.com")
+            KookyShellIntegration.remotePasteUpload(from: pb, target: SSHRemoteTarget(host: "deploy@example.com"))
         )
         let pasted = await upload()
 
@@ -1046,7 +1086,7 @@ final class ShellIntegrationTests: XCTestCase {
         pb.setString("echo hello", forType: .string)
 
         // Plain text stays a local paste — no subprocess, no upload closure.
-        XCTAssertNil(KookyShellIntegration.remotePasteUpload(from: pb, host: "deploy@example.com"))
+        XCTAssertNil(KookyShellIntegration.remotePasteUpload(from: pb, target: SSHRemoteTarget(host: "deploy@example.com")))
     }
 
     func testPasteboardHasTerminalPasteContentMatchesReadability() {
@@ -1140,7 +1180,7 @@ final class ShellIntegrationTests: XCTestCase {
         var delivered: [String] = []
         let handled = KookyShellIntegration.paste(
             from: pb,
-            host: nil,
+            target: nil,
             plainText: .viaCore({ coreCalls += 1; return true }),
             deliver: { delivered.append($0) }
         )
@@ -1158,11 +1198,17 @@ final class ShellIntegrationTests: XCTestCase {
         var delivered: [String] = []
         let handled = KookyShellIntegration.paste(
             from: pb,
-            host: nil,
+            target: nil,
             plainText: .callerHandles,
             deliver: { delivered.append($0) }
         )
         XCTAssertFalse(handled)
         XCTAssertTrue(delivered.isEmpty)
     }
+}
+
+/// True when `arguments` carries `flag` immediately followed by `value` — the
+/// only spelling ssh/scp honour for a port (they reject a glued `-p2222`).
+private func hasAdjacentPair(_ arguments: [String], _ flag: String, _ value: String) -> Bool {
+    zip(arguments, arguments.dropFirst()).contains { $0 == flag && $1 == value }
 }

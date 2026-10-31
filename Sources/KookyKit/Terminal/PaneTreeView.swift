@@ -1275,7 +1275,7 @@ private struct PaneContextMenu: View {
                 let engine = session.engine
                 _ = KookyShellIntegration.paste(
                     from: .general,
-                    host: session.sshWorkspaceHost,
+                    target: session.sshWorkspaceTarget,
                     plainText: .viaCore({ engine.pasteFromClipboardViaCore() }),
                     deliver: { engine.paste($0) }
                 )
@@ -1534,7 +1534,7 @@ private struct PaneComposerBar: View {
         VStack(alignment: .leading, spacing: 6) {
             ComposerTextView(
                 text: $session.composerDraft,
-                remotePasteHost: session.sshWorkspaceHost,
+                remotePasteTarget: session.sshWorkspaceTarget,
                 pane: pane,
                 workspace: workspace,
                 store: store,
@@ -1632,11 +1632,11 @@ private struct PaneComposerBar: View {
 private final class ComposerNSTextView: NSTextView {
     var onFocusGained: (() -> Void)?
 
-    /// Session's spawn-pinned SSH host — same paste routing signal the
-    /// surface's ⌘V uses (see `TerminalEngine.pasteUploadHostProvider`).
+    /// Session's spawn-pinned SSH host + port — same paste routing signal the
+    /// surface's ⌘V uses (see `TerminalEngine.pasteUploadTargetProvider`).
     /// A plain value, set once at construction: it never changes for a
     /// session's lifetime and the composer is `.id(session.id)`-scoped.
-    var remotePasteHost: String?
+    var remotePasteTarget: SSHRemoteTarget?
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
@@ -1659,7 +1659,7 @@ private final class ComposerNSTextView: NSTextView {
         // wherever the caret is when they land.
         if KookyShellIntegration.paste(
             from: pb,
-            host: remotePasteHost,
+            target: remotePasteTarget,
             plainText: .callerHandles,
             deliver: { [weak self] text in
                 self?.insertText(text, replacementRange: self?.selectedRange() ?? NSRange())
@@ -1677,7 +1677,7 @@ private final class ComposerNSTextView: NSTextView {
 /// intercepts the Return command itself, before any newline is inserted.
 private struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
-    var remotePasteHost: String?
+    var remotePasteTarget: SSHRemoteTarget?
     let pane: Pane
     let workspace: Workspace
     let store: WorkspaceStore
@@ -1691,7 +1691,7 @@ private struct ComposerTextView: NSViewRepresentable {
         let tv = ComposerNSTextView(frame: .zero)
         let coordinator = context.coordinator
         tv.onFocusGained = { [weak coordinator] in coordinator?.activatePane() }
-        tv.remotePasteHost = remotePasteHost
+        tv.remotePasteTarget = remotePasteTarget
         tv.minSize = .zero
         tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         tv.isVerticallyResizable = true
@@ -1741,7 +1741,7 @@ private struct ComposerTextView: NSViewRepresentable {
         }
         let coordinator = context.coordinator
         tv.onFocusGained = { [weak coordinator] in coordinator?.activatePane() }
-        tv.remotePasteHost = remotePasteHost
+        tv.remotePasteTarget = remotePasteTarget
         if tv.string != text { tv.string = text }
         applyAppearance(to: tv)
     }
