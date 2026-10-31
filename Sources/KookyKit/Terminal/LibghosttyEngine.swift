@@ -1,5 +1,9 @@
 import AppKit
 import GhosttyKit
+import os
+
+/// Unified-log logger for tab-switch / surface lifecycle diagnostics.
+private let kookyLog = Logger(subsystem: "com.iamcorey.kooky", category: "tab-switch")
 
 
 // MARK: - LibghosttyApp
@@ -10,6 +14,14 @@ import GhosttyKit
 @MainActor
 final class LibghosttyApp {
     static let shared = LibghosttyApp()
+    /// Timestamp of the most recent console transition (lock/unlock, wake,
+    /// display-set change). A surface hidden across one of these comes back
+    /// with a stale frame — its IOSurface still holds whatever was last
+    /// presented before the display went away, while the renderer's damage
+    /// tracking believes it holds the newer frame it drew while hidden — so
+    /// the unhide path uses this to decide whether it must rebuild the
+    /// renderer instead of just redrawing.
+    private(set) static var lastConsoleTransition = -Double.infinity
 
     private(set) var app: ghostty_app_t?
 
@@ -86,6 +98,8 @@ final class LibghosttyApp {
                 ghostty_app_keyboard_changed(app)
             }
         }
+
+        installConsoleTransitionObservers()
     }
 
     /// The config currently applied to the app. libghostty's embedded API
@@ -100,9 +114,9 @@ final class LibghosttyApp {
     private var currentConfig: ghostty_config_t?
 
 
-    func reloadConfig() {
+    func reloadConfig(extraLines: [String] = []) {
         guard let app else { return }
-        guard let config = KookySettings.makeGhosttyConfig() else {
+        guard let config = KookySettings.makeGhosttyConfig(extraLines: extraLines) else {
             NSLog("kooky: ghostty_config_new failed during reload")
             return
         }
@@ -118,6 +132,139 @@ final class LibghosttyApp {
         currentConfig = config
         refreshHostConfig()
         reportColorScheme()
+    }
+
+    private var consoleResyncPending = false
+    /// Set by any reload-glyphs request in the current notification burst and
+    /// consumed by the last deferred pass, so a `didBecomeActive` that arrives
+    /// before the unlock notification still gets the renderer rebuild.
+    private var consoleResyncWantsGlyphs = false
+
+    /// Re-assert every live surface's backing chain against its window's current
+    /// scale. AppKit stops delivering `viewDidChangeBackingProperties` reliably
+    /// across a console transition, so nothing else repairs a layer left at the
+    /// pre-transition density. Cheap: libghostty drops an unchanged DPI and an
+    /// unchanged pixel size, so an agreeing chain only gets a redraw.
+    func resyncSurfacesAfterConsoleTransition() {
+        for view in GhosttySurfaceRegistry.allViews() {
+            view.resyncBackingAfterConsoleTransition()
+        }
+    }
+
+    /// Forces a renderer-thread unrealize/realize transaction on every live
+    /// surface, then asks each one to redraw and present.
+    ///
+    /// A font-grid rebuild re-rasterizes glyphs, but it leaves the renderer's
+    /// own buffers and its incremental row bookkeeping intact — and that is
+    /// where a long lock can strand a frame: measured 2026-31-10, the first
+    /// frame presented after an overnight lock showed the *previous* viewport
+    /// behind the new one (same tab, same session, two scroll offsets, ghost at
+    /// ~30% intensity), survived 2m17s of no rendering, and only disappeared
+    /// when a tab unhide forced a full redraw. The engine exposes exactly one
+    /// host lever for that: `ghostty_surface_rebuild_renderer` — "force one
+    /// renderer-thread unrealize/realize transaction without freeing the
+    /// surface, PTY, terminal state, or scrollback".
+    func rebuildSurfacesRenderer() {
+        for view in GhosttySurfaceRegistry.allViews() {
+            view.rebuildRendererDiscardingFrame()
+        }
+    }
+
+    /// Sleep / unlock / display-set change, i.e. every way the display leaves and
+    /// re-enters the console. Nothing handled these before: kooky trusted AppKit's
+    /// backing callback, which is exactly the callback that goes missing here.
+    ///
+    /// `reloadGlyphs` hands the surfaces a rebuilt font grid, which is the only
+    /// host-reachable way to make the renderer rasterize glyphs again — the
+    /// transition leaves the glyph atlas usable but soft (see
+    /// `rebuildFontGridCoalesced` for why a plain config apply cannot repair it).
+    /// It costs a markDirty rebuild of every surface, so it is reserved for
+    /// console transitions; a plain display-set change and an app activation
+    /// only need the density pass.
+    private func scheduleConsoleResync(reloadGlyphs: Bool) {
+        if reloadGlyphs {
+            // Only a real console transition (lock/unlock, wake,
+            // sessionDidBecomeActive) can strand a frame; a plain
+            // `didBecomeActive` or display-set change must not mark hidden tabs
+            // stale, or every tab switch after any app activation would pay a
+            // renderer rebuild.
+            Self.lastConsoleTransition = CACurrentMediaTime()
+            rebuildFontGridCoalesced()
+            consoleResyncWantsGlyphs = true
+        }
+        resyncSurfacesAfterConsoleTransition()
+        // Both edges need covering: the login-window lock/unlock notifications
+        // are posted around the display transition rather than after it (measured:
+        // a display sleep posts lock + unlock back to back with nothing at wake),
+        // so the first pass can run before AppKit applied the new scale to the
+        // window. One deferred chain at a time — a burst of these notifications
+        // would otherwise stack passes.
+        guard !consoleResyncPending else { return }
+        consoleResyncPending = true
+        let delays: [Double] = [0.5, 2.0]
+        for (index, delay) in delays.enumerated() {
+            let isLast = index == delays.count - 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if isLast { self.consoleResyncPending = false }
+                    self.resyncSurfacesAfterConsoleTransition()
+                    // The renderer rebuild has to be the LAST thing that runs:
+                    // it is what discards the stranded frame (see
+                    // `rebuildSurfacesRenderer`), and doing it before the window
+                    // has settled on its post-wake scale would strand the new
+                    // one instead.
+                    if isLast, self.consoleResyncWantsGlyphs {
+                        self.consoleResyncWantsGlyphs = false
+                        self.rebuildSurfacesRenderer()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ground truth for the lock-screen path. `DistributedNotificationCenter`
+    /// delivers `com.apple.screenIsLocked` / `Unlocked` (posted by loginwindow)
+    /// to any process, and they are the ONLY signal a display sleep produces —
+    /// measured: `pmset displaysleepnow` posts no `NSWorkspace.screensDidSleep`
+    /// / `screensDidWake`, no `didWake`, no display-reconfiguration callback and
+    /// no `didChangeScreenParameters`. Watching only the workspace notifications
+    /// would have left this bug's repro path uncovered.
+    private func installConsoleTransitionObservers() {
+        let distributed = DistributedNotificationCenter.default()
+        for name in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
+            distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleConsoleResync(reloadGlyphs: true) }
+            }
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.didWakeNotification,
+            NSWorkspace.sessionDidBecomeActiveNotification,
+            NSWorkspace.screensDidWakeNotification,
+        ] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleConsoleResync(reloadGlyphs: true) }
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scheduleConsoleResync(reloadGlyphs: false) }
+        }
+        // Coming back to kooky after an unlock is the last chance to repair a
+        // frame the compositor kept: the unlock notification can fire while the
+        // display is still off. Density pass only — a per-activation glyph
+        // rebuild would make every ⌘-tab a full redraw of every surface.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scheduleConsoleResync(reloadGlyphs: false) }
+        }
     }
 
     /// Tells the core whether kooky's ACTIVE THEME is dark — deliberately not
@@ -153,6 +300,69 @@ final class LibghosttyApp {
         dispatchToMain {
             self.reloadPending = false
             self.reloadConfig()
+        }
+    }
+
+    private var fontGridRebuildPending = false
+    /// Ping-pongs between two weights so a user who already pins one of them in
+    /// their own config still gets a different grid key out of the probe.
+    private var probeVariationWeight = 700
+    /// A console transition posts several notifications in a burst (measured:
+    /// `screenIsLocked`, then on wake `screenIsUnlocked` plus
+    /// `sessionDidBecomeActive` / `screensDidWake`), and the per-runloop
+    /// `fontGridRebuildPending` flag only folds the ones that land in the same
+    /// turn. Every rebuild is two full markDirty redraws of every surface, so
+    /// the burst is squashed onto a time window instead.
+    private var lastFontGridRebuild = -Double.infinity
+    private static let fontGridRebuildInterval: Double = 1.5
+
+    /// Rebuilds every surface's font grid, i.e. forces the renderer to
+    /// re-rasterize every glyph.
+    ///
+    /// A config apply is NOT enough on its own: when the font keys match the
+    /// live grid, the apply is a cache hit that reuses the existing grid and its
+    /// glyph atlas, so nothing is re-rasterized. That is exactly why the soft,
+    /// un-bold text survives every reload, redraw and density fix, while
+    /// changing the font size by hand cures it — the size is part of the grid
+    /// key. Measured via the `font_shared_grid_set` debug stream: a resync
+    /// reload logs no face decisions at all, a reload that changes a font key
+    /// logs every face.
+    ///
+    /// So: apply twice. The first apply carries one throwaway key — a
+    /// `font-variation` weight — which is neither what the user's config sets
+    /// (700/701 ping-pong) nor rasterized visibly by a non-variable font
+    /// (measured: identical stem widths, same cell size, no resize). That lands
+    /// on a different grid key and builds a fresh grid. The second apply restores
+    /// the pristine config, and because the grid set does not survive an apply,
+    /// that grid is fresh too. Both are full markDirty rebuilds of every surface,
+    /// so this stays reserved for console transitions and the first launch.
+    func rebuildFontGridCoalesced() {
+        guard !fontGridRebuildPending else { return }
+        let now = CACurrentMediaTime()
+        guard now - lastFontGridRebuild >= Self.fontGridRebuildInterval else { return }
+        fontGridRebuildPending = true
+        lastFontGridRebuild = now
+        let weight = probeVariationWeight
+        probeVariationWeight = weight == 700 ? 701 : 700
+        dispatchToMain {
+            self.fontGridRebuildPending = false
+            self.reloadConfig(extraLines: ["font-variation = wght=\(weight)"])
+            self.reloadConfig()
+            self.rebuildSurfacesRenderer()
+        }
+    }
+
+    private var launchGridRebuildScheduled = false
+
+    /// One rebuild per process, once the first surface exists: a session's first
+    /// grid can be built before the window has settled on its theme and backing
+    /// scale (the cold-boot repro — text was soft right after a reboot, before
+    /// any lock), and a later apply that matches those keys would keep it.
+    func scheduleLaunchFontGridRebuild() {
+        guard !launchGridRebuildScheduled else { return }
+        launchGridRebuildScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            MainActor.assumeIsolated { self?.rebuildFontGridCoalesced() }
         }
     }
 
@@ -303,11 +513,23 @@ private func dispatchToMain(_ work: @MainActor @escaping () -> Void) {
 enum GhosttySurfaceRegistry {
     private static let views = NSHashTable<GhosttySurfaceView>.weakObjects()
 
-    static func add(_ view: GhosttySurfaceView) { views.add(view) }
+    static func add(_ view: GhosttySurfaceView) {
+        let isFirst = views.allObjects.isEmpty
+        views.add(view)
+        // First grid of the process: give the window a beat to settle on its
+        // theme and backing scale, then rebuild once so a grid built against
+        // the pre-settle state doesn't stay cached for the whole session.
+        if isFirst { LibghosttyApp.shared.scheduleLaunchFontGridRebuild() }
+    }
 
     static func allSurfaces() -> [ghostty_surface_t] {
         views.allObjects.compactMap(\.surface)
     }
+
+    /// Live views, for repairs that need the AppKit side (layer density, window
+    /// scale) rather than just the core handle — the console-transition resync is
+    /// the only such caller.
+    static func allViews() -> [GhosttySurfaceView] { views.allObjects }
 }
 
 /// Hops to main + recovers the originating `GhosttySurfaceView` from libghostty's
@@ -699,6 +921,12 @@ final class GhosttySurfaceView: NSView {
     /// fits on screen is trivially at the bottom.
     private var viewportAtBottom = true
 
+    /// `CACurrentMediaTime()` at the last hide; compared against
+    /// `LibghosttyApp.lastConsoleTransition` on unhide to tell "hidden across a
+    /// sleep/lock" (stale frame, needs a renderer rebuild) from an ordinary tab
+    /// switch (incremental redraw is enough).
+    private var hiddenSince = -Double.infinity
+
     /// ghostty's scrollbar `offset` is measured from the TOP (0 = top of
     /// scrollback); the viewport sits at the bottom (active area) when it spans
     /// down to the last row, i.e. `offset + len == total`. Content that fits on
@@ -1029,6 +1257,22 @@ final class GhosttySurfaceView: NSView {
         didSet { if oldValue != isOffScreen { updateRenderLink() } }
     }
 
+    /// Discards a frame the renderer thinks it already drew but the display
+    /// never kept. A surface that was hidden while the display slept re-enters
+    /// the console with an IOSurface holding the *pre-sleep* frame while the
+    /// renderer's damage tracking has moved on, so the next incremental frame
+    /// leaves the old viewport visible behind the new one (measured 2026-10-31:
+    /// two scroll offsets of the same session at ~30% intensity). Only a
+    /// renderer rebuild discards that state.
+    func rebuildRendererDiscardingFrame() {
+        guard let surface else { return }
+        if ghostty_surface_rebuild_renderer(surface) {
+            kookyLog.error("kooky-tab RENDERER-REBUILD")
+        }
+        ghostty_surface_refresh(surface)
+        setNeedsRender()
+    }
+
     /// Present the active surface immediately instead of waiting for the next vsync.
     func renderNowIfNeeded() {
         guard let surface, !isHiddenOrHasHiddenAncestor, !isOffScreen else { return }
@@ -1053,6 +1297,7 @@ final class GhosttySurfaceView: NSView {
 
     override func viewDidHide() {
         super.viewDidHide()
+        hiddenSince = CACurrentMediaTime()
         updateRenderLink()
     }
 
@@ -1067,8 +1312,22 @@ final class GhosttySurfaceView: NSView {
         createSurfaceIfReady()
         // A hidden tab may have missed geometry changes. Re-sync only when it
         // becomes visible, avoiding background SIGWINCH while preserving the
-        // first visible frame's dimensions.
-        if surface != nil { propagateSizeToSurface(force: true) }
+        // first visible frame's dimensions. No `force`: the surface stayed in
+        // the same window across the hide/unhide, so pixel-dedup correctly
+        // skips a redundant set_size when the frame didn't change. A forced
+        // push here sends a SIGWINCH to TUI apps (omp/Claude Code) whose
+        // async redraw moves the viewport after scroll_to_bottom has already
+        // re-pinned — the user returns to a tab scrolled to the middle.
+        if surface != nil { propagateSizeToSurface() }
+        // A tab that sat out a console transition comes back holding a
+        // pre-sleep frame (see `rebuildRendererDiscardingFrame`); the redraw
+        // this unhide just scheduled is incremental and cannot clear it.
+        // Rebuilding here is also the only variant whose effect is
+        // guaranteed — the transition's own pass runs on surfaces that are
+        // still hidden.
+        if hiddenSince < LibghosttyApp.lastConsoleTransition {
+            rebuildRendererDiscardingFrame()
+        }
         updateRenderLink()
     }
 
@@ -1259,10 +1518,22 @@ final class GhosttySurfaceView: NSView {
     /// blank gutter on the right and input overflowing the viewport (issue #8).
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        guard let surface, let scale = window?.backingScaleFactor else { return }
-        // Skip colorspace-only changes (same scale) so we don't fire a
+        guard let surface, let scale = window?.backingScaleFactor else {
+            kookyLog.error("kooky-tab BACKING skip=no-surface-or-window")
+            return
+        }
+        // A stale layer.contentsScale must still be repaired even when the
+        // window scale is unchanged: console transitions (display sleep, screen
+        // lock, fast user switching) hand the layer back at the wrong density
+        // while `backingScaleFactor` already matches our latch, which composites
+        // the high-DPI surface at half resolution — soft text / thin bold that
+        // only a later resize or config reload clears. Every other same-scale
+        // callback is still skipped (colorspace-only) so we don't fire a
         // gratuitous set_size → SIGWINCH (conda scrollback-wipe known issue).
-        guard scale != lastBackingScale else { return }
+        let layerScaleStale = layer.map { $0.contentsScale != scale } ?? false
+        guard scale != lastBackingScale || layerScaleStale else { return }
+        let scaleFrom = lastBackingScale.map { "\($0)" } ?? "nil"
+        kookyLog.error("kooky-tab BACKING scale=\(scaleFrom)->\(scale) layer=\(layerScaleStale ? "stale" : "ok")")
         lastBackingScale = scale
         layer?.contentsScale = scale
         ghostty_surface_set_content_scale(surface, scale, scale)
@@ -1270,6 +1541,29 @@ final class GhosttySurfaceView: NSView {
         // the dedup wouldn't skip it; force is belt-and-suspenders so the grid is
         // guaranteed to relearn the new DPI (issue #8) right after set_content_scale.
         propagateSizeToSurface(force: true)
+    }
+
+    /// Re-assert the backing chain against the window's current scale after the
+    /// display re-enters the console. That transition is where AppKit stops
+    /// delivering `viewDidChangeBackingProperties` reliably: the layer can keep
+    /// the pre-sleep density and the compositor can keep presenting a frame the
+    /// renderer never refreshed (soft glyphs / bold that stopped being bold).
+    /// Only a stale scale or pixel size is pushed — `ghostty_surface_set_size`
+    /// is a SIGWINCH, so an agreeing chain just gets a redraw.
+    func resyncBackingAfterConsoleTransition() {
+        guard let surface, let window else { return }
+        let scale = window.backingScaleFactor
+        let layerStale = layer.map { $0.contentsScale != scale } ?? false
+        let scaleStale = scale != lastBackingScale
+        let px = (UInt32(max(0, bounds.width * scale)), UInt32(max(0, bounds.height * scale)))
+        let sizeStale = lastPushedSizePx.map { $0 != px } ?? true
+        kookyLog.error("kooky-tab BACKING resync scale=\(scale) layer=\(layerStale ? "stale" : "ok") size=\(sizeStale ? "stale" : "ok")")
+        lastBackingScale = scale
+        layer?.contentsScale = scale
+        ghostty_surface_set_content_scale(surface, scale, scale)
+        if scaleStale || sizeStale { propagateSizeToSurface(force: true) }
+        ghostty_surface_refresh(surface)
+        setNeedsRender()
     }
 
     override func becomeFirstResponder() -> Bool {
