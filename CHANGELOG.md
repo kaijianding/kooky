@@ -10,6 +10,7 @@ Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 - Fixed: a collapsed project stays collapsed across sidebar hides, file-tree switches, and relaunches.
 - Changed: a project cannot be renamed — the folder's name is the project's name, so two rows can never claim the same folder.
 - Changed: Open Recent (File menu and ⌘P) is project-oriented. Picking a folder you already have shows the project it already is — unfolding it and focusing its first workspace — instead of adding a duplicate row; a new folder becomes a project with one workspace.
+- New: SSH workspaces take an optional port. The create sheet's new `port` field (leave it empty for whatever `ssh` would pick) rides along as `kooky-ssh -p N`, so a host reachable only on a non-standard port no longer needs a `~/.ssh/config` alias; image pastes upload over the same port (`scp -P`). The sidebar, title, and Session Info show `host:port` when a port is set.
 - New: window background image — Settings → Appearance picks a PNG or JPEG drawn once behind the whole window (sidebar and terminal share it). Fit defaults to cover and image opacity to 50%; the terminal shows it through `background-opacity`.
 
 ## v0.51.12 — 2026-10-12
