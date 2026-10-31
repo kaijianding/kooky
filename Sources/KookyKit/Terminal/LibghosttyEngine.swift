@@ -927,6 +927,12 @@ final class GhosttySurfaceView: NSView {
     /// switch (incremental redraw is enough).
     private var hiddenSince = -Double.infinity
 
+    /// True while this surface's GPU renderer has been released because nobody
+    /// can see it (`reclaimRendererWhileHidden`). The reveal path turns this
+    /// into one forced unrealize/realize transaction so the renderer cannot
+    /// lose the release when it processes the reveal before the release.
+    private var rendererReclaimed = false
+
     /// ghostty's scrollbar `offset` is measured from the TOP (0 = top of
     /// scrollback); the viewport sits at the bottom (active area) when it spans
     /// down to the last row, i.e. `offset + len == total`. Content that fits on
@@ -1273,6 +1279,27 @@ final class GhosttySurfaceView: NSView {
         setNeedsRender()
     }
 
+    /// Releases the renderer's GPU resources (swap chain, submission queue) for
+    /// a surface nobody can see, matching what the engine does for a hidden tab:
+    /// terminal state, PTY and scrollback survive. The reveal path restores it
+    /// with one forced unrealize/realize transaction, so a surface that becomes
+    /// presentable before the renderer thread consumed this release cannot skip
+    /// the release step and keep a stale swap chain.
+    private func reclaimRendererWhileHidden() {
+        guard let surface, !rendererReclaimed else { return }
+        // Safety net: never release a renderer that is still on screen, however
+        // we got here. `viewDidHide` also fires for a window that just left the
+        // screen, which `isHiddenOrHasHiddenAncestor` alone does not report.
+        let onScreen = (window?.isVisible ?? false)
+            && !isHiddenOrHasHiddenAncestor
+            && !isOffScreen
+        guard !onScreen else { return }
+        if ghostty_surface_set_renderer_realized(surface, false) {
+            rendererReclaimed = true
+            kookyLog.error("kooky-tab RENDERER-RECLAIM")
+        }
+    }
+
     /// Present the active surface immediately instead of waiting for the next vsync.
     func renderNowIfNeeded() {
         guard let surface, !isHiddenOrHasHiddenAncestor, !isOffScreen else { return }
@@ -1298,7 +1325,10 @@ final class GhosttySurfaceView: NSView {
     override func viewDidHide() {
         super.viewDidHide()
         hiddenSince = CACurrentMediaTime()
+        // Stop presenting first, then drop the GPU resources: a render tick that
+        // raced the reclaim would otherwise touch a released swap chain.
         updateRenderLink()
+        reclaimRendererWhileHidden()
     }
 
     override func viewDidUnhide() {
@@ -1325,7 +1355,14 @@ final class GhosttySurfaceView: NSView {
         // Rebuilding here is also the only variant whose effect is
         // guaranteed — the transition's own pass runs on surfaces that are
         // still hidden.
-        if hiddenSince < LibghosttyApp.lastConsoleTransition {
+        let staleFrame = hiddenSince < LibghosttyApp.lastConsoleTransition
+        // A reclaimed renderer has no swap chain left, so an incremental frame
+        // would be drawn into freed presentation state. One rebuild covers both
+        // cases: it unrealizes, then realizes into a fresh chain from cached
+        // cells.
+        let reclaimed = rendererReclaimed
+        rendererReclaimed = false
+        if staleFrame || reclaimed {
             rebuildRendererDiscardingFrame()
         }
         updateRenderLink()
