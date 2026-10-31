@@ -4,6 +4,7 @@ Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
 ## Unreleased
 
+- New: SSH workspaces take an optional port. The create sheet's new `port` field (leave it empty for whatever `ssh` would pick) rides along as `kooky-ssh -p N`, so a host reachable only on a non-standard port no longer needs a `~/.ssh/config` alias; image pastes upload over the same port (`scp -P`). The sidebar, title, and Session Info show `host:port` when a port is set.
 - New: window background image — Settings → Appearance picks a PNG or JPEG drawn once behind the whole window (sidebar and terminal share it). Fit defaults to cover and image opacity to 50%; the terminal shows it through `background-opacity`.
 - Changed: bundled themes now live in individual Ghostty-style files, making new themes easier to add while preserving all existing colors and theme selections. Palette entries keep their explicit color indices regardless of line order. Thanks @kaijianding for the refactor. (#77)
 - Fixed: deleting a session from session history no longer reports "couldn't delete session" when the transcript is already gone (removed by the agent CLI, another window, or a manual `rm`). An already-deleted session now counts as deleted, so the stale row leaves the list instead of failing.
