@@ -823,9 +823,8 @@ struct SessionHistoryView: View {
             .padding(12)
             .frame(width: Self.cardWidth, alignment: .leading)
             .onPreferenceChange(MessageHeightPreferenceKey.self) { messageHeight = $0 }
-            // Match the sidebar's own surface so the preview reads as part
-            // of the chrome, not a detached system panel.
-            .background(Theme.glassEnabled ? Theme.glassPanelTint : Theme.chromeBackground)
+            // Keep the preview card opaque so terminal text underneath does not show through.
+            .background(Theme.chromeBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.chromeSeparator, lineWidth: 1))
             .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
