@@ -131,8 +131,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     public override init() { super.init() }
 
+    /// One header line per launch so a capture set can be tied to a build and to
+    /// the mode that was actually live (`KOOKY_GEOMETRY_LOG`).
+    private func logGeometryRecorderHeader() {
+        let log = TerminalGeometryLog.shared
+        guard log.isEnabled else { return }
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        log.note("kooky \(version) (\(build)) geometry recorder mode=\(log.mode.rawValue) dir=\(log.captureDirectory.path)")
+        log.event("launch", [
+            ("os", ProcessInfo.processInfo.operatingSystemVersionString),
+            ("env", ProcessInfo.processInfo.environment["KOOKY_GEOMETRY_LOG"] ?? "unset"),
+        ])
+    }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         KookyFonts.registerOnce()
+        logGeometryRecorderHeader()
         // MUST STAY ABOVE ANY UI CONSTRUCTION — `restoreWindows()` below is the
         // near neighbour that would break it. NSToolTipManager reads this delay
         // once, when it is first created, and never re-reads it; the manager is
@@ -1794,6 +1809,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             #selector(handleDecreaseFontSize),
             #selector(handleResetFontSize),
             #selector(handleClearScrollback),
+            #selector(handleCaptureTerminalGeometry),
             #selector(handleJumpToPreviousPrompt),
             #selector(handleJumpToNextPrompt)
         ) {
@@ -1898,6 +1914,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     @objc private func handleClearScrollback() {
         activeStore?.active?.activeSession?.engine.performAction("clear_screen")
+    }
+
+    /// Diagnostic hook for the "incomplete table render" investigation: dumps
+    /// libghostty's own grid (viewport + scrollback) to
+    /// ~/Library/Logs/kooky/geometry/ so a broken screen can be compared
+    /// against what the terminal actually holds, without resizing anything.
+    @objc private func handleCaptureTerminalGeometry() {
+        guard let engine = activeStore?.active?.activeSession?.engine else { return }
+        let path = engine.captureGeometry(label: "manual") ?? "(no surface)"
+        TerminalGeometryLog.shared.note("manual capture -> \(path)")
     }
 
     @objc private func handleJumpToPreviousPrompt() {

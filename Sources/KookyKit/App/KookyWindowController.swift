@@ -269,6 +269,22 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
     func windowDidResize(_ notification: Notification) {
         alignTrafficLights()
         noteFrameChanged()
+        logWindowGeometry("window-resize")
+    }
+
+    /// Frame vs. the content rect matters: the titlebar's own height changes
+    /// between windowed and fullscreen, so a stale chain shows up here as a
+    /// content height that doesn't match the frame the pane is laid out in.
+    private func logWindowGeometry(_ event: String) {
+        guard let window else { return }
+        let frame = window.frame
+        let content = window.contentRect(forFrameRect: frame)
+        TerminalGeometryLog.shared.event(event, [
+            ("frame", "\(Int(frame.origin.x.rounded())),\(Int(frame.origin.y.rounded())) \(Int(frame.width.rounded()))x\(Int(frame.height.rounded()))"),
+            ("content", "\(Int(content.width.rounded()))x\(Int(content.height.rounded()))"),
+            ("fullscreen", window.styleMask.contains(.fullScreen) ? "1" : "0"),
+            ("live", window.inLiveResize ? "1" : "0"),
+        ])
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -277,11 +293,17 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillEnterFullScreen(_ notification: Notification) {
         preFullScreenFrame = window?.frame
+        logWindowGeometry("fullscreen-will-enter")
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        logWindowGeometry("fullscreen-did-enter")
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         preFullScreenFrame = nil
         alignTrafficLights()
+        logWindowGeometry("fullscreen-did-exit")
         // The exit transition's own resize / move notifications arrived while
         // the frame was pinned and were skipped — save once now.
         noteFrameChanged()
@@ -293,6 +315,7 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
         preFullScreenFrame = nil
         noteFrameChanged()
+        logWindowGeometry("fullscreen-failed-enter")
     }
 
     /// Per-frame during drags and live resizes; the store's 1s debounce

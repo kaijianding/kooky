@@ -5,6 +5,14 @@ import os
 /// Unified-log logger for tab-switch / surface lifecycle diagnostics.
 private let kookyLog = Logger(subsystem: "com.iamcorey.kooky", category: "tab-switch")
 
+/// Userdata for the PTY tee callback. Deliberately tiny and immutable: the
+/// callback runs on libghostty's IO read thread and must not touch any
+/// main-actor state, so it only needs the stream name to file bytes under.
+final class PTYTeeBox: @unchecked Sendable {
+    let stream: String
+    init(stream: String) { self.stream = stream }
+}
+
 
 // MARK: - LibghosttyApp
 
@@ -865,6 +873,14 @@ final class LibghosttyEngine: TerminalEngine {
         surfaceView.flushPropagateSize()
     }
 
+    /// Diagnostic: dump libghostty's own grid (viewport + scrollback) to disk.
+    /// Returns the written file path, or nil when no surface exists / logging
+    /// is off. See `TerminalGeometryLog` for the surrounding flight recorder.
+    @discardableResult
+    func captureGeometry(label: String) -> String? {
+        surfaceView.captureGeometry(label: label)
+    }
+
     @discardableResult
     func performAction(_ name: String) -> Bool {
         surfaceView.performAction(name)
@@ -921,6 +937,13 @@ final class GhosttySurfaceView: NSView {
     /// fits on screen is trivially at the bottom.
     private var viewportAtBottom = true
 
+    /// `viewportAtBottom` as of the last `viewDidHide`. A hidden tab's core
+    /// does NOT follow PTY output (ghostty's `scroll-to-bottom = output` is
+    /// unimplemented upstream), so the scrollback grows past the frozen
+    /// viewport and SCROLLBAR actions drift `viewportAtBottom` to false even
+    /// though the user left the tab at the bottom. Unhide must re-pin based
+    /// on the LEAVE state, not the drifted current value.
+    private var wasAtBottomWhenHidden = true
     /// `CACurrentMediaTime()` at the last hide; compared against
     /// `LibghosttyApp.lastConsoleTransition` on unhide to tell "hidden across a
     /// sleep/lock" (stale frame, needs a renderer rebuild) from an ordinary tab
@@ -954,6 +977,20 @@ final class GhosttySurfaceView: NSView {
     /// prompt-reflow flicker, issue #29 audit). Reset on surface teardown so a
     /// re-created surface always re-syncs.
     private var lastPushedSizePx: (UInt32, UInt32)?
+
+    /// PTY name of the current surface, cached at creation. Cached because the
+    /// geometry recorder stamps `tty=` on every line — without it a multi-tab
+    /// log can't be attributed to a surface — and `ghostty_surface_tty_name` is
+    /// a syscall that shouldn't run on the resize path.
+    private var surfaceTTY = "surface"
+
+    /// Tap on the raw PTY byte stream, installed only in the logger's `bytes`
+    /// mode. Owned here so the C callback's unretained userdata can never
+    /// dangle past `releaseSurface`.
+    private var ptyTee: PTYTeeBox?
+    /// Render heartbeat counters — the epoch is a wall clock, not a frame count.
+    private var renderFrames = 0
+    private var lastRenderHeartbeat = Date.distantPast
 
     var pendingConfig: TerminalSessionConfig?
     var onPwdChange: ((String) -> Void)?
@@ -1119,6 +1156,12 @@ final class GhosttySurfaceView: NSView {
 
     func releaseSurface() {
         guard let dying = surface else { return }
+        kookyLog.error("kooky-tab RELEASE-SURFACE")
+        geometryLog.event("surface-release", geometryContext() + gridFields())
+        // Drop the raw-output tap before the surface (and its userdata box) go
+        // away — the IO thread must never reach a freed box.
+        ghostty_surface_set_pty_tee_cb(dying, nil, nil)
+        ptyTee = nil
         // Despite the C API's `foreground_pid` name, libghostty returns the
         // PTY's `tcgetpgrp` value. An interactive shell puts its foreground
         // agent job in this separate process group, outside the shell group
@@ -1134,6 +1177,7 @@ final class GhosttySurfaceView: NSView {
         // state immediately; the local `dying` keeps the handle for free.
         surface = nil
         lastPushedSizePx = nil
+        surfaceTTY = "surface"
         let retainedHostBits = UInt(bitPattern: Unmanaged.passRetained(self).toOpaque())
         SurfaceTeardownCoordinator.shared.enqueue(
             surfaceBits: UInt(bitPattern: dying),
@@ -1220,6 +1264,9 @@ final class GhosttySurfaceView: NSView {
             // No focus handling here: `PaneTreeHostView.syncFocus` is the one
             // keyboard authority (the old per-view mount-grab raced, issue #24).
             let reattaching = surface != nil
+            let hiddenNow = isHiddenOrHasHiddenAncestor
+            kookyLog.error("kooky-tab MOVETOWINDOW reattaching=\(reattaching) hidden=\(hiddenNow)")
+            geometryLog.event("move-to-window", geometryContext([("reattach", reattaching ? "1" : "0")]) + gridFields())
             createSurfaceIfReady()
             // Defer until after SwiftUI's hosting finishes its current event
             // loop pass, otherwise the originating button click reclaims focus.
@@ -1260,7 +1307,11 @@ final class GhosttySurfaceView: NSView {
     /// leaves the view in the window with no hidden ancestor, so without this
     /// the render link would keep presenting frames nobody can see.
     var isOffScreen = false {
-        didSet { if oldValue != isOffScreen { updateRenderLink() } }
+        didSet {
+            guard oldValue != isOffScreen else { return }
+            geometryLog.event("offscreen", geometryContext([("value", isOffScreen ? "1" : "0")]))
+            updateRenderLink()
+        }
     }
 
     /// Discards a frame the renderer thinks it already drew but the display
@@ -1316,8 +1367,10 @@ final class GhosttySurfaceView: NSView {
     /// unhide presents the accumulated state.
     private func updateRenderLink() {
         if surface != nil, window != nil, !isHiddenOrHasHiddenAncestor, !isOffScreen {
+            geometryLog.event("render-link", [("state", "start")])
             startRenderLink()
         } else {
+            geometryLog.event("render-link", [("state", "stop")])
             stopRenderLink()
         }
     }
@@ -1325,6 +1378,14 @@ final class GhosttySurfaceView: NSView {
     override func viewDidHide() {
         super.viewDidHide()
         hiddenSince = CACurrentMediaTime()
+        // Snapshot the LEAVE state before the hidden window drifts it:
+        // without this, a tab the user left at the bottom returns scrolled
+        // to the middle of the scrollback grown while hidden.
+        wasAtBottomWhenHidden = viewportAtBottom
+        let bottomAtHide = wasAtBottomWhenHidden
+        kookyLog.error("kooky-tab HIDE wasAtBottom=\(bottomAtHide)")
+        geometryLog.event("hide", geometryContext([("wasAtBottom", bottomAtHide ? "1" : "0")]) + gridFields())
+        captureTabSwitch(label: "hide")
         // Stop presenting first, then drop the GPU resources: a render tick that
         // raced the reclaim would otherwise touch a released swap chain.
         updateRenderLink()
@@ -1333,6 +1394,15 @@ final class GhosttySurfaceView: NSView {
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
+        let sNil = surface == nil
+        let bottomWhenHidden = wasAtBottomWhenHidden
+        let atBottomNow = viewportAtBottom
+        let bSize = "\(bounds.size.width)x\(bounds.size.height)"
+        kookyLog.error("kooky-tab UNHIDE surfaceNil=\(sNil) wasAtBottomWhenHidden=\(bottomWhenHidden) viewportAtBottom=\(atBottomNow) bounds=\(bSize)")
+        geometryLog.event("unhide", geometryContext([
+            ("surfaceNil", sNil ? "1" : "0"),
+            ("wasAtBottom", bottomWhenHidden ? "1" : "0"),
+        ]) + gridFields())
         // Surfaces are created lazily on first *reveal* (not first mount):
         // a restored background tab must not spawn its shell + Metal surface
         // until the user actually switches to it — the same laziness the old
@@ -1340,30 +1410,52 @@ final class GhosttySurfaceView: NSView {
         // CLI background tabs — those views arrive here with the surface
         // already created, so this call no-ops.)
         createSurfaceIfReady()
-        // A hidden tab may have missed geometry changes. Re-sync only when it
-        // becomes visible, avoiding background SIGWINCH while preserving the
-        // first visible frame's dimensions. No `force`: the surface stayed in
-        // the same window across the hide/unhide, so pixel-dedup correctly
-        // skips a redundant set_size when the frame didn't change. A forced
-        // push here sends a SIGWINCH to TUI apps (omp/Claude Code) whose
-        // async redraw moves the viewport after scroll_to_bottom has already
-        // re-pinned — the user returns to a tab scrolled to the middle.
-        if surface != nil { propagateSizeToSurface() }
-        // A tab that sat out a console transition comes back holding a
-        // pre-sleep frame (see `rebuildRendererDiscardingFrame`); the redraw
-        // this unhide just scheduled is incremental and cannot clear it.
-        // Rebuilding here is also the only variant whose effect is
-        // guaranteed — the transition's own pass runs on surfaces that are
-        // still hidden.
-        let staleFrame = hiddenSince < LibghosttyApp.lastConsoleTransition
-        // A reclaimed renderer has no swap chain left, so an incremental frame
-        // would be drawn into freed presentation state. One rebuild covers both
-        // cases: it unrealizes, then realizes into a fresh chain from cached
-        // cells.
-        let reclaimed = rendererReclaimed
-        rendererReclaimed = false
-        if staleFrame || reclaimed {
-            rebuildRendererDiscardingFrame()
+        if surface != nil {
+            // Re-sync size only if it changed while hidden. No `force`: the
+            // surface stayed in the same window across the hide/unhide, so
+            // pixel-dedup correctly skips a redundant set_size (a forced
+            // push sends a SIGWINCH to TUI apps whose async redraw fights
+            // the re-pin below).
+            propagateSizeToSurface()
+            // Re-pin to the bottom based on the LEAVE state. The hidden
+            // core doesn't follow output (scroll-to-bottom = output is
+            // unimplemented upstream), so `viewportAtBottom` has drifted
+            // false and the propagateSizeToSurface re-pin above was a no-op.
+            // Restoring the leave position is what the user expects: they
+            // left the tab at the latest output, they get the latest output.
+            //
+            // The leave snapshot itself is only as good as `viewportAtBottom`,
+            // which ghostty refreshes from SCROLLBAR actions alone — a stale
+            // false there silently skips the re-pin, and the tab comes back
+            // showing the frame that was mid-draw when it was hidden. The
+            // KOOKY_PIN_ON_UNHIDE=1 arm exists to test exactly that: it pins
+            // regardless of the snapshot so the difference is observable
+            // without changing default behavior.
+            let forced = Self.pinsOnUnhide
+            if wasAtBottomWhenHidden || forced {
+                performAction("scroll_to_bottom")
+            }
+            // A tab that sat out a console transition comes back holding a
+            // pre-sleep frame (see `rebuildRendererDiscardingFrame`); the redraw
+            // this unhide just scheduled is incremental and cannot clear it.
+            // Rebuilding here is also the only variant whose effect is
+            // guaranteed — the transition's own pass runs on surfaces that are
+            // still hidden.
+            //
+            // A reclaimed renderer has no swap chain left, so an incremental
+            // frame would be drawn into freed presentation state. One rebuild
+            // covers both cases: it unrealizes, then realizes into a fresh
+            // chain from cached cells.
+            let staleFrame = hiddenSince < LibghosttyApp.lastConsoleTransition
+            let reclaimed = rendererReclaimed
+            rendererReclaimed = false
+            if staleFrame || reclaimed {
+                rebuildRendererDiscardingFrame()
+            }
+            geometryLog.event("unhide-settled", geometryContext() + gridFields() + [
+                ("pin", wasAtBottomWhenHidden ? "leave" : (forced ? "forced" : "none")),
+            ])
+            captureTabSwitch(label: "unhide")
         }
         updateRenderLink()
     }
@@ -1375,6 +1467,8 @@ final class GhosttySurfaceView: NSView {
               let config = pendingConfig,
               let app = LibghosttyApp.shared.app
         else { return }
+        kookyLog.error("kooky-tab CREATE-SURFACE (new)")
+
 
         let scale = Double(window.backingScaleFactor)
         // Pin contentsScale so Core Animation doesn't double-scale ghostty's
@@ -1438,6 +1532,10 @@ final class GhosttySurfaceView: NSView {
         }
         surface = new
         pendingConfig = nil
+        surfaceTTY = Self.ttyName(of: new) ?? "surface"
+        geometryLog.event("surface-create", geometryContext([("scale", "\(scale)")]) + gridFields())
+        installPTYTee(new)
+        scheduleGridSamples(reason: "create")
         // A fresh surface's conditional state defaults to LIGHT — seed it with
         // kooky's active theme so the 996 query / mode 2031 / conditional
         // themes are right from the first prompt, and register for the
@@ -1486,6 +1584,17 @@ final class GhosttySurfaceView: NSView {
             return
         }
         needsRender = false
+        renderFrames += 1
+        let now = Date()
+        // One heartbeat per second of *rendering* (an idle terminal produces
+        // none): a timeline of grid size vs. frames, which is what shows a
+        // grid stuck at a stale width while the screen keeps updating.
+        if now.timeIntervalSince(lastRenderHeartbeat) >= 1 {
+            lastRenderHeartbeat = now
+            let frames = renderFrames
+            renderFrames = 0
+            geometryLog.event("render", geometryContext([("frames", "\(frames)")]) + gridFields())
+        }
         ghostty_surface_render_now(surface)
     }
 
@@ -1500,8 +1609,14 @@ final class GhosttySurfaceView: NSView {
     /// count composes N overlapping owners so suspension holds until the LAST ends.
     private var sizePropagationSuspendCount = 0
     var suspendsSizePropagation: Bool { sizePropagationSuspendCount > 0 }
-    func beginSizePropagationSuspension() { sizePropagationSuspendCount += 1 }
-    func endSizePropagationSuspension() { sizePropagationSuspendCount = max(0, sizePropagationSuspendCount - 1) }
+    func beginSizePropagationSuspension() {
+        sizePropagationSuspendCount += 1
+        geometryLog.event("suspension", geometryContext([("op", "begin")]))
+    }
+    func endSizePropagationSuspension() {
+        sizePropagationSuspendCount = max(0, sizePropagationSuspendCount - 1)
+        geometryLog.event("suspension", geometryContext([("op", "end")]))
+    }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
@@ -1515,13 +1630,21 @@ final class GhosttySurfaceView: NSView {
         //    frame, each a set_size → SIGWINCH, thrashing the shell (conda
         //    scrollback wipe + prompt-reflow flicker, issue #29 audit).
         //    viewDidEndLiveResize pushes once with the final size.
-        if suspendsSizePropagation { return }
-        if window?.inLiveResize == true { return }
+        if suspendsSizePropagation {
+            geometryLog.event("frame", geometryContext([("skip", "suspend")]))
+            return
+        }
+        if window?.inLiveResize == true {
+            geometryLog.event("frame", geometryContext([("skip", "live")]))
+            return
+        }
+        geometryLog.event("frame", geometryContext())
         propagateSizeToSurface()
     }
 
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
+        geometryLog.event("live-resize-end", geometryContext([("skip", suspendsSizePropagation ? "suspend" : "none")]))
         // If a pane-zoom / status-bar animation is mid-flight, its own flush
         // (after the suspend window clears) is the authoritative settle — don't
         // leak a set_size here inside the very window the suspend exists to
@@ -1535,6 +1658,7 @@ final class GhosttySurfaceView: NSView {
     }
 
     func flushPropagateSize() {
+        geometryLog.event("flush", geometryContext([("skip", window?.inLiveResize == true ? "live" : "none")]))
         // If a window-edge live-resize is in progress, defer to viewDidEndLiveResize
         // for the settle — pushing here would leak a set_size mid-drag (the exact
         // SIGWINCH the live-resize defer exists to suppress). The drag-end push
@@ -2114,6 +2238,13 @@ final class GhosttySurfaceView: NSView {
 
     private var scrollAccum: NSPoint = .zero
     private static let scrollLinePoints: Double = 20.0
+    /// Diagnostics knob (`KOOKY_PIN_ON_UNHIDE=1`): re-pin the viewport on every
+    /// unhide instead of only when the leave snapshot said "at bottom". Used to
+    /// A/B the "hidden tab returned a frozen, half-drawn frame" hypothesis.
+    static let pinsOnUnhide: Bool = {
+        let raw = (ProcessInfo.processInfo.environment["KOOKY_PIN_ON_UNHIDE"] ?? "").lowercased()
+        return raw == "1" || raw == "true" || raw == "yes"
+    }()
 
     override func scrollWheel(with event: NSEvent) {
         guard let surface else {
@@ -2344,7 +2475,20 @@ final class GhosttySurfaceView: NSView {
         // Track bottom-pinned state on every tick — including the ones we skip
         // below for indicator purposes — so the resize re-pin in
         // propagateSizeToSurface always sees a current value.
-        viewportAtBottom = Self.isViewportAtBottom(total: total, offset: offset, len: len)
+        let nowAtBottom = Self.isViewportAtBottom(total: total, offset: offset, len: len)
+        if nowAtBottom != viewportAtBottom {
+            // The pin flag is the sole input to both re-pin decisions, so a
+            // false transition on a tab the user never scrolled is the smoking
+            // gun: record the numbers that produced it.
+            geometryLog.event("pin-flag", geometryContext([
+                ("to", nowAtBottom ? "bottom" : "off"),
+                ("total", "\(total)"),
+                ("offset", "\(offset)"),
+                ("len", "\(len)"),
+                ("hidden", isHiddenOrHasHiddenAncestor ? "1" : "0"),
+            ]))
+        }
+        viewportAtBottom = nowAtBottom
         guard total > len, len > 0 else { return }
         let next = (total: total, offset: offset, len: len)
         let previous = lastScrollbar
@@ -2525,6 +2669,157 @@ final class GhosttySurfaceView: NSView {
         return flags
     }
 
+    // MARK: - Geometry flight recorder
+    //
+    // Diagnostic-only plumbing around the size chain (see TerminalGeometryLog).
+    // Nothing here may change behavior: every helper either formats a log line
+    // or reads state libghostty already holds.
+
+    private var geometryLog: TerminalGeometryLog { .shared }
+
+    /// Pixel size the chain *would* push right now, derived exactly the way
+    /// `propagateSizeToSurface` does, so a skipped push can still be compared
+    /// against libghostty's current grid.
+    private func pushPixels() -> (width: UInt32, height: UInt32) {
+        let scale = window?.backingScaleFactor ?? lastBackingScale ?? 2
+        return (UInt32(max(0, bounds.width * scale)), UInt32(max(0, bounds.height * scale)))
+    }
+
+    /// Every input the size chain depends on, in one line.
+    private func geometryContext(_ extra: [(String, String)] = []) -> [(String, String)] {
+        var fields: [(String, String)] = [
+            ("tty", surfaceTTY),
+            ("bounds", "\(Int(bounds.width.rounded()))x\(Int(bounds.height.rounded()))"),
+            ("px", "\(pushPixels().width)x\(pushPixels().height)"),
+            ("hidden", isHiddenOrHasHiddenAncestor ? "1" : "0"),
+            ("offscreen", isOffScreen ? "1" : "0"),
+            ("win", window == nil ? "0" : "1"),
+            ("live", window?.inLiveResize == true ? "1" : "0"),
+            ("suspend", "\(sizePropagationSuspendCount)"),
+            ("surface", surface == nil ? "0" : "1"),
+        ]
+        if let lastPushedSizePx {
+            fields.append(("lastpushed", "\(lastPushedSizePx.0)x\(lastPushedSizePx.1)"))
+        }
+        return fields + extra
+    }
+
+    /// libghostty's own view of the grid: the columns/rows it derived from the
+    /// pixel push, the authoritative cell metrics, and the scrollbar position.
+    /// A push whose resulting grid doesn't match `px / cell` is the smoking gun
+    /// for a broken terminal-side size application.
+    private func gridFields() -> [(String, String)] {
+        guard let surface else { return [("grid", "none")] }
+        let size = ghostty_surface_size(surface)
+        var fields: [(String, String)] = [
+            ("grid", "\(size.columns)x\(size.rows)"),
+            ("gridpx", "\(size.width_px)x\(size.height_px)"),
+            ("cell", "\(size.cell_width_px)x\(size.cell_height_px)"),
+        ]
+        var metrics = ghostty_surface_grid_metrics_s()
+        if ghostty_surface_grid_metrics(surface, &metrics) {
+            fields.append(("metrics", "\(metrics.columns)x\(metrics.rows)"))
+            fields.append(("cursor", "\(metrics.cursor_column),\(metrics.cursor_row)\(metrics.cursor_in_viewport ? "" : "*")"))
+            fields.append(("pad", "\(metrics.padding_left),\(metrics.padding_top)"))
+        }
+        var scrollbar = ghostty_surface_scrollbar_s()
+        if ghostty_surface_scrollbar(surface, &scrollbar) {
+            fields.append(("scroll", "\(scrollbar.offset)/\(scrollbar.len)of\(scrollbar.total)rev\(scrollbar.row_space_revision)"))
+            // Distance from the viewport's bottom edge to the newest row. Any
+            // drift here on a surface the user never scrolled is output landing
+            // below a frozen viewport — the shape of "the tab came back showing
+            // a half-drawn frame".
+            let gap = scrollbar.total > scrollbar.offset + scrollbar.len
+                ? scrollbar.total - (scrollbar.offset + scrollbar.len) : 0
+            fields.append(("gap", "\(gap)"))
+        }
+        return fields
+    }
+
+    /// Samples the grid twice after a push: 200 ms catches a repaint that
+    /// already started, 2.5 s catches one still running. A torn frame is
+    /// always visible in the second sample even when the first looks sane.
+    /// Only the slow sample dumps the grid; both samples always log the cheap
+    /// geometry line. Two ~32 KB dumps per push evicted every other surface's
+    /// history within minutes (8903 dumps in four days, 60 kept), which is how
+    /// a manual capture disappeared before it could be read.
+    private func scheduleGridSamples(reason: String) {
+        guard geometryLog.isEnabled else { return }
+        for (delay, tag) in [(0.2, "fast"), (2.5, "slow")] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.surface != nil else { return }
+                self.geometryLog.event(
+                    "grid-sample",
+                    self.geometryContext(self.gridFields() + [("tag", tag), ("reason", reason)])
+                )
+                guard tag == "slow" else { return }
+                self.captureGeometry(label: "\(reason)-\(tag)")
+            }
+        }
+    }
+
+    /// Dumps the grid slightly *after* a tab switch. Tab switches are the one
+    /// gesture the log cannot otherwise explain: no resize happens (pixel-dedup
+    /// skips the push), so no dump fires, yet "the table came back incomplete"
+    /// either exists in the grid or does not. Deferred so the dump's scrollback
+    /// walk never lands inside the switch transition.
+    private func captureTabSwitch(label: String) {
+        guard geometryLog.isEnabled else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, self.surface != nil else { return }
+            self.captureGeometry(label: label)
+        }
+    }
+
+    /// Exports libghostty's grid — the visible viewport plus `scrollbackRows`
+    /// history rows, with full restore state — beside the geometry log. This is
+    /// the content truth: if the log shows a correct grid size while this dump
+    /// already lacks rows, the terminal dropped content; if the dump is
+    /// complete, only presentation is wrong.
+    @discardableResult
+    func captureGeometry(label: String, scrollbackRows: UInt64 = 4_000) -> String? {
+        guard geometryLog.isEnabled, let surface else { return nil }
+        // Anchored to the ACTIVE area rather than the viewport: omp can write
+        // rows below a viewport the user left scrolled up, and those are exactly
+        // the rows a torn repaint hides. Theme export stays off (noise only).
+        let exported = ghostty_surface_render_grid_json_v2(surface, "", 0, scrollbackRows, 0, false, true)
+        defer { ghostty_string_free(exported) }
+        guard let ptr = exported.ptr, exported.len > 0 else {
+            geometryLog.event("grid-dump", geometryContext([("label", label), ("res", "empty")]))
+            return nil
+        }
+        let data = Data(bytes: UnsafeRawPointer(ptr), count: Int(exported.len))
+        let tty = surfaceTTY
+        geometryLog.event(
+            "grid-dump",
+            geometryContext([("label", label), ("bytes", "\(data.count)")])
+        )
+        return geometryLog.blob(tag: "grid-\(label)-\(tty)", ext: "json", data: data)
+    }
+
+    private static func ttyName(of surface: ghostty_surface_t) -> String? {
+        let name = ghostty_surface_tty_name(surface)
+        defer { ghostty_string_free(name) }
+        guard let ptr = name.ptr, name.len > 0 else { return nil }
+        let raw = String(decoding: UnsafeRawBufferPointer(start: ptr, count: Int(name.len)), as: UTF8.self)
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Installs the raw-output tap. The C callback receives an unretained box;
+    /// `releaseSurface` clears the callback before letting the box go.
+    private func installPTYTee(_ surface: ghostty_surface_t) {
+        guard geometryLog.recordsPTYBytes else { return }
+        let box = PTYTeeBox(stream: Self.ttyName(of: surface) ?? "surface")
+        ptyTee = box
+        ghostty_surface_set_pty_tee_cb(surface, { userdata, bytes, len in
+            guard let userdata, let bytes, len > 0 else { return }
+            let box = Unmanaged<PTYTeeBox>.fromOpaque(userdata).takeUnretainedValue()
+            TerminalGeometryLog.shared.appendPTYBytes(Data(bytes: bytes, count: Int(len)), stream: box.stream)
+        }, Unmanaged.passUnretained(box).toOpaque())
+        geometryLog.event("pty-tee", [("tty", box.stream)])
+    }
+
     private func propagateSizeToSurface(force: Bool = false) {
         // Require a live window — never propagate while detached. A workspace
         // switch briefly removes the session's NSView from the window
@@ -2533,14 +2828,23 @@ final class GhosttySurfaceView: NSView {
         // overflowed and stuck until the next resize (issue #8 follow-up — only
         // on the 1x monitor, never on the 2x laptop where the fallback matched).
         // viewDidMoveToWindow re-syncs on reattach.
-        guard let surface, let window, force || !isHiddenOrHasHiddenAncestor else { return }
+        guard let surface, let window, force || !isHiddenOrHasHiddenAncestor else {
+            geometryLog.event("push-skip", geometryContext([
+                ("reason", surface == nil ? "no-surface" : (window == nil ? "no-window" : "hidden")),
+                ("force", force ? "1" : "0"),
+            ]))
+            return
+        }
         let scale = window.backingScaleFactor
         let widthPx = UInt32(bounds.size.width * scale)
         let heightPx = UInt32(bounds.size.height * scale)
         // SwiftUI's tab-swap rebuild briefly hands us a 0-sized frame before
         // layout completes; pushing 0 to libghostty shrinks its row count and
         // never fully recovers, so the visible buffer creeps upward each swap.
-        guard widthPx > 0, heightPx > 0 else { return }
+        guard widthPx > 0, heightPx > 0 else {
+            geometryLog.event("push-skip", geometryContext([("reason", "zero"), ("force", force ? "1" : "0")]))
+            return
+        }
         // Drop a redundant push of an identical pixel size. SwiftUI re-layouts,
         // sub-cell setFrameSize nudges, and the viewDidEndLiveResize flush all
         // re-enter with the same frame; each ghostty_surface_set_size is a
@@ -2550,9 +2854,17 @@ final class GhosttySurfaceView: NSView {
         // scale shifts with the scale); only a true no-op is dropped. `force`
         // covers the paths that must re-sync even an unchanged size — surface
         // create, reattach, post-zoom flush, DPI change.
-        if !force, let last = lastPushedSizePx, last == (widthPx, heightPx) { return }
+        if !force, let last = lastPushedSizePx, last == (widthPx, heightPx) {
+            geometryLog.event("push-skip", geometryContext([("reason", "dedup")]))
+            return
+        }
+        geometryLog.event("push", geometryContext([("force", force ? "1" : "0"), ("new", "\(widthPx)x\(heightPx)")]) + gridFields())
         lastPushedSizePx = (widthPx, heightPx)
         ghostty_surface_set_size(surface, widthPx, heightPx)
+        // `pushed` carries the grid libghostty derived from the size just
+        // handed to it — the one place a terminal-side mismatch becomes
+        // visible without guessing.
+        geometryLog.event("pushed", geometryContext([("force", force ? "1" : "0")]) + gridFields())
         // ghostty does NOT re-pin the viewport to the bottom on resize — it only
         // follows the latest output when a PTY write or keystroke calls
         // scroll(.active). A resize (live window drag → SIGWINCH-per-frame,
@@ -2570,6 +2882,7 @@ final class GhosttySurfaceView: NSView {
         // libghostty's async RENDER action — removes the ordering dependency
         // between set_size and the render loop.
         setNeedsRender()
+        scheduleGridSamples(reason: "push")
     }
 }
 

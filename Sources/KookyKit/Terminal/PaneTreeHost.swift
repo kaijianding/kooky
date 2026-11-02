@@ -70,7 +70,20 @@ final class PaneTreeHostView: FlippedLayoutView {
         // invisible) and re-sync at activation via the reconcile-set
         // `needsLayout`.
         if let activeId = store.active?.id, let view = workspaceViews[activeId] {
-            if view.frame != bounds { view.frame = bounds }
+            if view.frame != bounds {
+                view.frame = bounds
+                // Only log real changes: `layout()` runs per SwiftUI pass, but
+                // the pane frame is the reference every engine push is derived
+                // from, so its transitions (and only those) belong on the
+                // timeline.
+                TerminalGeometryLog.shared.event("pane-layout", [
+                    ("workspace", activeId.uuidString.prefix(8).lowercased()),
+                    ("bounds", "\(Int(bounds.width.rounded()))x\(Int(bounds.height.rounded()))"),
+                    ("origin", "\(Int(bounds.origin.x.rounded())),\(Int(bounds.origin.y.rounded()))"),
+                    ("host", "\(Int(self.bounds.width.rounded()))x\(Int(self.bounds.height.rounded()))"),
+                    ("windows", "\(workspaceViews.count)"),
+                ])
+            }
         }
     }
 

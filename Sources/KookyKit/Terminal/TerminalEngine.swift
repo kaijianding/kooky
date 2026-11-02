@@ -136,6 +136,10 @@ protocol TerminalEngine: AnyObject {
     /// Force a one-shot size sync of the surface to the current view
     /// frame. Used when un-suspending after an animation.
     func flushSize()
+    /// Diagnostic hook: dump the engine's own grid (viewport + scrollback) to
+    /// the geometry flight recorder and return the file path. Only the
+    /// libghostty engine can answer; everything else returns nil.
+    func captureGeometry(label: String) -> String?
     /// Gates whether the engine's view grabs keyboard first-responder when it
     /// mounts into a window. `TerminalTabHost` sets it from the pane's active
     /// state so first visits land focus only when the pane is active (issue #24).
@@ -178,4 +182,5 @@ protocol TerminalEngine: AnyObject {
 
 extension TerminalEngine {
     func setOnScreen(_ onScreen: Bool) {}
+    func captureGeometry(label: String) -> String? { nil }
 }
