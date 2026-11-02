@@ -9,4 +9,7 @@
 "Remove project" = "Remove project";
 "SSH workspaces" = "SSH workspaces";
 "max-tab-width" = "Max tab width";
+"chrome-background-mix" = "Chrome background mix";
+"Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default." = "Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default.";
 "Maximum tab width in pixels. Values are capped at 200px." = "Maximum tab width in pixels. Values are capped at 200px.";
+"Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top." = "Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top.";
