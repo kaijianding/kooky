@@ -12,6 +12,7 @@ Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 - Changed: Open Recent (File menu and ⌘P) is project-oriented. Picking a folder you already have shows the project it already is — unfolding it and focusing its first workspace — instead of adding a duplicate row; a new folder becomes a project with one workspace.
 - New: SSH workspaces take an optional port. The create sheet's new `port` field (leave it empty for whatever `ssh` would pick) rides along as `kooky-ssh -p N`, so a host reachable only on a non-standard port no longer needs a `~/.ssh/config` alias; image pastes upload over the same port (`scp -P`). The sidebar, title, and Session Info show `host:port` when a port is set.
 - New: window background image — Settings → Appearance picks a PNG or JPEG drawn once behind the whole window (sidebar and terminal share it). Fit defaults to cover and image opacity to 50%; the terminal shows it through `background-opacity`.
+- Fixed: dismissing a sheet with Esc no longer silences every later sheet. The dismissed sheet left its create request parked in the store, so File › New SSH Workspace (same for new worktree and the confirm sheets) stopped opening anything for the rest of the session.
 
 ## v0.51.12 — 2026-10-12
 
