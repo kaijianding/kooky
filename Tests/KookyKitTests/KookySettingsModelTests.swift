@@ -148,6 +148,47 @@ final class KookySettingsModelTests: XCTestCase {
         )
     }
 
+    func testTabMaxWidthDefaultsToTwoHundredPixels() {
+        XCTAssertEqual(KookySettingsModel.resolvedTabMaxWidth(nil), 200)
+        XCTAssertEqual(KookySettingsModel.resolvedTabMaxWidth(200), 200)
+    }
+
+    func testTabMaxWidthClampsToSupportedRange() {
+        XCTAssertEqual(KookySettingsModel.resolvedTabMaxWidth(240), 200)
+        XCTAssertEqual(KookySettingsModel.resolvedTabMaxWidth(80), 100)
+        XCTAssertEqual(KookySettingsModel.resolvedTabMaxWidth("bad"), 200)
+    }
+
+    func testLocalTerminalTitleDropsUserAndHostPrefix() {
+        XCTAssertEqual(
+            WorkspaceStore.localTerminalTitle(
+                "corey@my-mac: ~/srv",
+                username: "corey",
+                localHostNames: ["my-mac"],
+                fallbackPath: "/Users/corey/srv"
+            ),
+            "~/srv"
+        )
+        XCTAssertEqual(
+            WorkspaceStore.localTerminalTitle(
+                "corey@remote: ~/srv",
+                username: "corey",
+                localHostNames: ["my-mac"],
+                fallbackPath: "/Users/corey/srv"
+            ),
+            "corey@remote: ~/srv"
+        )
+        XCTAssertEqual(
+            WorkspaceStore.localTerminalTitle(
+                "corey@my-mac",
+                username: "corey",
+                localHostNames: ["my-mac"],
+                fallbackPath: "/Users/corey/srv"
+            ),
+            "/Users/corey/srv"
+        )
+    }
+
     func testShowSearchPillReadsLegacyGeneralKey() {
         XCTAssertFalse(
             KookySettingsModel.resolvedShowSearchPill(

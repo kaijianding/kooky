@@ -8,3 +8,5 @@
 "New workspace" = "New workspace";
 "Remove project" = "Remove project";
 "SSH workspaces" = "SSH workspaces";
+"max-tab-width" = "Max tab width";
+"Maximum tab width in pixels. Values are capped at 200px." = "Maximum tab width in pixels. Values are capped at 200px.";
